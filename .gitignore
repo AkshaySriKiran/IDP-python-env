@@ -1,0 +1,31 @@
+# Secrets & local env (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+google-services.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs & local scratch
+*.log
+output.log
+.Rhistory
+
+# Local caches / deps
+node_modules/
+.venv/
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/

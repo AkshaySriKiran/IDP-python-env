@@ -1,0 +1,95 @@
+{
+  "version": "1.0",
+  "normalization_mappings": {
+    "maintenance_routines": [
+      { "enum": "DAILY_SHIFT", "matches": ["daily", "shift", "every morning", "each shift", "day"] },
+      { "enum": "WEEKLY", "matches": ["week", "weekly", "every 7 days"] },
+      { "enum": "MONTHLY", "matches": ["month", "monthly", "every 30 days", "every 4 weeks"] },
+      { "enum": "QUARTERLY", "matches": ["quarter", "quarterly", "3 months"] },
+      { "enum": "BI_ANNUAL", "matches": ["6 months", "half year", "bi-annual"] },
+      { "enum": "YEARLY", "matches": ["year", "yearly", "annual", "12 months"] },
+      { "enum": "HOURS_BASED", "matches": ["hour", "hrs"] },
+      { "enum": "OVERHAUL", "matches": ["overhaul", "rebuild"] }
+    ],
+    "spare_parts_frequency": [
+      { "enum": "HIGH_WEAR", "matches": ["high", "frequent", "often"] },
+      { "enum": "MEDIUM_WEAR", "matches": ["medium", "moderate"] },
+      { "enum": "LOW_WEAR", "matches": ["low", "rare"] },
+      { "enum": "OVERHAUL_REPLACEMENT", "matches": ["overhaul"] }
+    ]
+  },
+  "categories": {
+    "Default": {
+      "keywords": [
+        "replace", "lubricate", "grease", "inspect", "check", "clean", "torque", "coaxiality", "tighten", "weld", "drain", "replenish", "maintenance", "interval",
+        "bearing", "filter", "friction plate", "pad", "disc", "valve", "coupling", "seal", "clamp", "stopper", "gasket", "spring", "hose", "pipe", "pump", 
+        "roller", "screw", "bolt", "nut", "pin", "wire", "rope", "plug", "motor", "gear", "reducer", "coupler", "fitting", "caliper", "drum", "shaft", 
+        "gearbox", "sump", "oil", "lubricant", "spare part", "part number", "part no", "drawing number", "drawing no", "model number", "model no", "qty",
+        "illustrated parts list", "spare parts list", "bill of materials", "bom", "pos", "description"
+      ],
+      "partClasses": [
+        { "key": "lubrication", "terms": ["oil lubrication system", "main grease lubrication", "lubrication system", "lubrication", "lubricating oil", "oil circuit", "oil pressure"] },
+        { "key": "brake_system", "terms": ["hydraulic disc brake system", "disc brake system", "disc brake", "brake system"] },
+        { "key": "pneumatic", "terms": ["pneumatic control system", "pneumatic system", "air release port"] },
+        { "key": "bearing", "terms": ["drum shaft bearing", "support bearing", "bearing block", "main bearing", "ball bearings", "bearing"] },
+        { "key": "filter", "terms": ["lubricating oil filter element", "oil suction filter element", "filter element", "filter core", "suction filter", "filter"] },
+        { "key": "caliper", "terms": ["safety caliper", "brake caliper", "caliper weld seams", "caliper"] },
+        { "key": "disc", "terms": ["brake disc assembly", "disc spring set", "disc spring", "brake disc", "disc"] },
+        { "key": "coupling", "terms": ["input shaft coupling", "drum gear coupling", "gear coupling", "coupling"] },
+        { "key": "valve", "terms": ["pneumatic directional valve", "toggle valve", "relief valve", "breather valve", "directional valve", "valve"] },
+        { "key": "seal", "terms": ["safety caliper seal assembly", "oil seal", "seal kit", "seal assembly", "mechanical seal", "shaft seal", "seal"] },
+        { "key": "roller", "terms": ["kick back roller", "kickback roller", "roller"] },
+        { "key": "pump", "terms": ["lubricating oil pump", "gear oil pump", "pump motor set", "oil pump", "pump"] },
+        { "key": "motor", "terms": ["main motor", "oil pump motor set", "motor winding", "motor"] },
+        { "key": "gearbox", "terms": ["gearbox oil sump", "reduction gearbox", "gearbox", "reducer"] },
+        { "key": "drum", "terms": ["lebus drum", "drawworks drum", "drum shaft assembly", "drum shaft", "drum"] },
+        { "key": "rope", "terms": ["steel wire rope", "wire rope clamp", "rope stopper", "rope holder", "wire rope", "rope"] },
+        { "key": "plates", "terms": ["transitional plates", "drum side plate", "friction plate", "plates", "plate"] },
+        { "key": "sleeve", "terms": ["shaft sleeve", "sleeve"] },
+        { "key": "gasket", "terms": ["flat gasket", "casing gasket", "gasket"] },
+        { "key": "o_ring", "terms": ["o-ring", "seal ring"] },
+        { "key": "joint", "terms": ["mechanical joint", "flexible coupling", "joint"] },
+        { "key": "shaft", "terms": ["transmission shaft", "drive shaft", "shaft"] },
+        { "key": "hardware", "terms": ["grub screw", "hex head screw", "screw", "bolt", "nut"] },
+        { "key": "engine", "terms": ["engine block", "diesel engine", "engine"] },
+        { "key": "compressor", "terms": ["air compressor", "compressor"] },
+        { "key": "cleaner", "terms": ["air cleaner", "cleaner element"] },
+        { "key": "battery", "terms": ["batteries", "battery terminal", "battery"] },
+        { "key": "radiator", "terms": ["cooling radiator", "radiator"] },
+        { "key": "tank", "terms": ["fuel tank", "oil tank", "water tank", "tank"] },
+        { "key": "winch", "terms": ["main winch", "sand reel", "winch"] },
+        { "key": "tophead", "terms": ["rotary tophead", "tophead"] },
+        { "key": "coolant", "terms": ["cooling system", "coolant"] },
+        { "key": "hydraulic", "terms": ["hydraulic reservoir", "hydraulic system", "hydraulic pump", "hydraulic filter", "hydraulic"] }
+      ]
+    },
+    "Pump": {
+      "keywords": ["pump", "motor", "seal", "bearing", "impeller", "casing", "suction", "discharge", "pressure", "flow", "lubrication", "grease", "oil", "vibration", "alignment"],
+      "partClasses": [
+        { "key": "pump_body", "terms": ["pump casing", "volute", "pump housing", "pump body"] },
+        { "key": "impeller", "terms": ["impeller assembly", "impeller"] },
+        { "key": "seal", "terms": ["mechanical seal", "gland packing", "shaft seal", "o-ring", "seal"] },
+        { "key": "bearing", "terms": ["thrust bearing", "radial bearing", "ball bearing", "roller bearing", "bearing housing"] },
+        { "key": "shaft", "terms": ["pump shaft", "drive shaft", "shaft sleeve"] },
+        { "key": "coupling", "terms": ["flexible coupling", "spacer coupling", "motor coupling"] },
+        { "key": "motor", "terms": ["electric motor", "drive motor", "stator", "rotor"] },
+        { "key": "lubrication", "terms": ["oil level gauge", "grease nipple", "lubricating oil", "grease"] }
+      ]
+    },
+    "Drawworks": {
+      "keywords": ["drawworks", "drum", "brake", "clutch", "chain", "sprocket", "lubrication", "motor", "transmission", "winch", "wire rope"],
+      "partClasses": [
+        { "key": "drum", "terms": ["lebus drum", "main drum", "sand line drum", "drum shaft"] },
+        { "key": "brake_system", "terms": ["disc brake", "band brake", "brake caliper", "brake rim", "brake block"] },
+        { "key": "transmission", "terms": ["gearbox", "transmission shaft", "chain drive", "sprocket"] },
+        { "key": "clutch", "terms": ["air clutch", "friction clutch", "pneumatic clutch"] },
+        { "key": "motor", "terms": ["traction motor", "ac motor", "dc motor"] },
+        { "key": "lubrication", "terms": ["oil pump", "lube system", "grease manifold"] }
+      ]
+    },
+    "Logbook": {
+      "keywords": ["logbook", "shift", "repair", "maintenance", "history", "record", "fault", "date", "replaced", "renewed", "attended by", "remarks", "work description"],
+      "partClasses": []
+    }
+  }
+}
