@@ -12,7 +12,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   
   <!-- CSS Stylesheet link -->
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=15">
 
   <!-- Apply saved theme before paint to avoid dark/light flash -->
   <script>
@@ -103,7 +103,7 @@
               <label for="page-range-end">To Page</label>
               <input type="number" id="page-range-end" min="1" placeholder="Last" class="settings-input">
             </div>
-            <p class="page-range-hint">PDF only. Leave blank to parse all pages (e.g. enter 500 &ndash; 600 to only parse those pages of a 1000-page manual).</p>
+            <p class="page-range-hint">PDF only. Leave blank to parse all pages (max 5000 per run). Example: 500 &ndash; 600 to parse only that range.</p>
           </div>
           
           <!-- Parsing Progress Overlay (Hidden by default) -->
@@ -336,7 +336,7 @@
               <!-- Excel Export Button -->
               <button class="btn btn-primary" id="export-btn">
                 <i data-lucide="file-spreadsheet"></i>
-                <span>Export to Excel</span>
+                <span>Export Excel (3 sheets)</span>
               </button>
             </div>
           </div>
@@ -438,6 +438,6 @@
   </script>
   
   <!-- Logic script link -->
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>

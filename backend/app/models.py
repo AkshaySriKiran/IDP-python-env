@@ -79,6 +79,7 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "omniparse-maintenance-api"
     version: str = "0.1.0"
+    busy: bool = False
 
 
 class ExtractOptions(BaseModel):

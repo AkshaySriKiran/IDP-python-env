@@ -80,12 +80,20 @@ async def extract_document(
     all_trouble: list[dict[str, Any]] = []
 
     if ext == "pdf":
-        page_payloads = extract_pdf_pages(
+        page_payloads = await asyncio.to_thread(
+            extract_pdf_pages,
             file_bytes,
             parse_strategy=options.parse_strategy,
             page_start=options.page_start,
             page_end=options.page_end,
         )
+        from ..pdf_utils import MAX_PDF_PAGES
+
+        if len(page_payloads) >= MAX_PDF_PAGES and not options.page_end:
+            warnings.append(
+                f"Page limit is {MAX_PDF_PAGES}. Processed {len(page_payloads)} page(s); "
+                f"set a From/To range if you need a different slice."
+            )
     elif ext == "txt":
         text = file_bytes.decode("utf-8", errors="replace")
         page_payloads = extract_txt_chunks(text)
@@ -112,17 +120,42 @@ async def extract_document(
         )
 
     for p in page_payloads:
-        pages_out.append(PageText(pageNum=p.page_num, text=p.text or ""))
+        # Truncate stored page text so a huge-page response stays browser-safe.
+        text = p.text or ""
+        if len(text) > 3000:
+            text = text[:3000] + "…"
+        pages_out.append(PageText(pageNum=p.page_num, text=text))
 
-    concurrency = 4 if options.engine == "gemini" else 1
+    # Process EVERY page — no TOC / keyword skipping.
+    llm_payloads = list(page_payloads)
+
+    if not llm_payloads:
+        return ExtractResponse(
+            maintenance=[],
+            spare_parts=[],
+            troubleshooting=[],
+            pages=pages_out,
+            meta=ExtractMeta(
+                filename=filename,
+                engine=f"{options.engine}:{options.gemini_model if options.engine == 'gemini' else options.ollama_model}",
+                parse_strategy=options.parse_strategy,
+                pages_total=len(page_payloads),
+                pages_processed=0,
+                warnings=warnings + ["No pages found to process."],
+            ),
+        )
+
+    # Higher concurrency for full-book Gemini runs (still rate-limit friendly).
+    concurrency = 8 if options.engine == "gemini" else 1
     sem = asyncio.Semaphore(concurrency)
     processed = 0
-    total = len(page_payloads)
+    total = len(llm_payloads)
 
     async def worker(payload):
         nonlocal processed
         text_for_llm = payload.text or ("OCR VISION EXTRACTION" if payload.image_b64 else "")
         if not text_for_llm.strip() and not payload.image_b64:
+            processed += 1
             return {"maintenance": [], "spare_parts": [], "troubleshooting": []}
         async with sem:
             try:
@@ -142,7 +175,7 @@ async def extract_document(
                 on_progress(f"Processed page {processed}/{total}", processed / total)
             return result
 
-    results = await asyncio.gather(*[worker(p) for p in page_payloads])
+    results = await asyncio.gather(*[worker(p) for p in llm_payloads])
     for result in results:
         all_maint.extend(result.get("maintenance") or [])
         all_spares.extend(result.get("spare_parts") or [])
@@ -167,7 +200,7 @@ async def extract_document(
             filename=filename,
             engine=f"{options.engine}:{options.gemini_model if options.engine == 'gemini' else options.ollama_model}",
             parse_strategy=options.parse_strategy,
-            pages_total=total,
+            pages_total=len(page_payloads),
             pages_processed=processed,
             maintenance_count=len(all_maint),
             spare_parts_count=len(all_spares),

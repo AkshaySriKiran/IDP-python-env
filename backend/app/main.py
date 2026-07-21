@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
@@ -32,15 +33,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Only one heavy extract at a time (keeps health checks usable after restart).
+_extract_lock = asyncio.Lock()
+_extract_busy = False
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    return HealthResponse()
+    return HealthResponse(busy=_extract_busy)
 
 
 @app.get("/api/health", response_model=HealthResponse)
 async def api_health() -> HealthResponse:
-    return HealthResponse()
+    return HealthResponse(busy=_extract_busy)
 
 
 @app.post("/api/extract", response_model=ExtractResponse)
@@ -57,10 +62,18 @@ async def api_extract(
     equipment_category: Optional[str] = Form("Default"),
     learned_patterns: Optional[str] = Form(None),
 ) -> ExtractResponse:
+    global _extract_busy
+
     if engine not in {"gemini", "ollama"}:
         raise HTTPException(status_code=400, detail="engine must be 'gemini' or 'ollama'")
     if parse_strategy not in {"native", "ocr"}:
         raise HTTPException(status_code=400, detail="parse_strategy must be 'native' or 'ocr'")
+
+    if _extract_lock.locked() or _extract_busy:
+        raise HTTPException(
+            status_code=503,
+            detail="Another extraction is already running. Wait for it to finish, or press Ctrl+C in the API terminal and run ./start-api.sh again.",
+        )
 
     filename = file.filename or "document"
     data = await file.read()
@@ -96,9 +109,14 @@ async def api_extract(
     if options.engine == "ollama" and not options.ollama_model:
         raise HTTPException(status_code=400, detail="Ollama model required")
 
-    try:
-        return await extract_document(data, filename, options)
-    except ValueError as err:
-        raise HTTPException(status_code=400, detail=str(err)) from err
-    except Exception as err:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Extraction failed: {err}") from err
+    async with _extract_lock:
+        _extract_busy = True
+        try:
+            # PDF parsing is CPU-heavy; keep the event loop free so /api/health stays responsive.
+            return await extract_document(data, filename, options)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        except Exception as err:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Extraction failed: {err}") from err
+        finally:
+            _extract_busy = False

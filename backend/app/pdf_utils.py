@@ -5,6 +5,9 @@ import io
 from dataclasses import dataclass
 from typing import Optional
 
+# Hard cap for one-shot PDF extraction (inclusive).
+MAX_PDF_PAGES = 5000
+
 
 @dataclass
 class PagePayload:
@@ -21,6 +24,11 @@ def resolve_page_range(total_pages: int, page_start: Optional[int], page_end: Op
     end = max(1, min(end, total_pages))
     if end < start:
         start, end = end, start
+
+    # Enforce max pages per request (keeps one-shot runs bounded).
+    if (end - start + 1) > MAX_PDF_PAGES:
+        end = start + MAX_PDF_PAGES - 1
+        end = min(end, total_pages)
     return start, end
 
 
@@ -39,6 +47,10 @@ def extract_pdf_pages(
     total = len(reader.pages)
     if total == 0:
         return []
+
+    if total > MAX_PDF_PAGES and not page_start and not page_end:
+        # No explicit range: process first MAX_PDF_PAGES pages.
+        page_start, page_end = 1, MAX_PDF_PAGES
 
     start, end = resolve_page_range(total, page_start, page_end)
     doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -59,6 +71,9 @@ def extract_pdf_pages(
             pass
 
         use_ocr = parse_strategy == "ocr" or len(native_text) < 40
+        # Only render page images when text is weak (avoids rendering thousands of JPEGs).
+        if parse_strategy == "ocr" and len(native_text) >= 80:
+            use_ocr = False
         image_b64 = None
         if use_ocr:
             page = doc.load_page(page_num - 1)

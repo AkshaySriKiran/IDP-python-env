@@ -97,12 +97,21 @@ try {
 
 async function checkPythonApiHealth() {
   try {
-    const resp = await fetch(`${apiBaseUrl}/api/health`, { method: "GET" });
-    if (!resp.ok) return false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${apiBaseUrl}/api/health`, {
+      method: "GET",
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!resp.ok) return { ok: false, busy: false };
     const data = await resp.json();
-    return data && data.status === "ok";
+    return {
+      ok: !!(data && data.status === "ok"),
+      busy: !!(data && data.busy)
+    };
   } catch (e) {
-    return false;
+    return { ok: false, busy: false };
   }
 }
 
@@ -115,7 +124,69 @@ function canUsePythonApiForFile(file, extension) {
   return !!file;
 }
 
-async function extractViaPythonApi(file) {
+function getConfiguredPageRange() {
+  const startVal = pageRangeStartInput && pageRangeStartInput.value ? parseInt(pageRangeStartInput.value, 10) : NaN;
+  const endVal = pageRangeEndInput && pageRangeEndInput.value ? parseInt(pageRangeEndInput.value, 10) : NaN;
+  return {
+    start: (!isNaN(startVal) && startVal > 0) ? startVal : null,
+    end: (!isNaN(endVal) && endVal > 0) ? endVal : null
+  };
+}
+
+async function countPdfPages(file) {
+  if (typeof pdfjsLib === "undefined") return null;
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+  return pdf.numPages || 0;
+}
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+async function confirmLargePdfIfNeeded(pages, fileSizeBytes = 0) {
+  const range = getConfiguredPageRange();
+  if (range.start || range.end) return true;
+
+  if (pages && pages > 5000) {
+    return confirm(
+      `This PDF has ${pages} pages.\n\n` +
+      `One-shot limit is 5000 pages. The API will process pages 1–5000 only unless you set a From/To range.\n\n` +
+      `Continue?`
+    );
+  }
+
+  if (pages && pages > 80) {
+    const hoursLow = Math.max(1, Math.round((pages / 8) * 8 / 3600));
+    const hoursHigh = Math.max(hoursLow + 1, Math.round((pages / 8) * 25 / 3600));
+    return confirm(
+      `This PDF has ${pages} pages.\n\n` +
+      `Full one-shot extraction processes EVERY page (up to 5000) and can take roughly ${hoursLow}–${hoursHigh}+ hours.\n\n` +
+      `Keep this browser tab open. Prefer Native text + Flash-Lite for speed/cost.\n\n` +
+      `Continue with ALL ${pages} pages in one go?`
+    );
+  }
+
+  if (!pages && fileSizeBytes > 40 * 1024 * 1024) {
+    const mb = (fileSizeBytes / (1024 * 1024)).toFixed(0);
+    return confirm(
+      `This PDF is ~${mb}MB (likely a very large manual).\n\n` +
+      `Full one-shot extraction processes every page (max 5000) and can take many hours.\n\n` +
+      `Keep this browser tab open.\n\n` +
+      `Continue with the FULL document in one go?`
+    );
+  }
+
+  return true;
+}
+
+async function extractViaPythonApi(file, pageCountHint = null) {
   const form = new FormData();
   form.append("file", file, file.name);
   form.append("engine", engineMode === "ollama" ? "ollama" : "gemini");
@@ -126,20 +197,50 @@ async function extractViaPythonApi(file) {
   form.append("ollama_model", ollamaModel || "");
   form.append("equipment_category", activeEquipmentCategory || "Default");
 
-  const startVal = pageRangeStartInput && pageRangeStartInput.value ? parseInt(pageRangeStartInput.value, 10) : NaN;
-  const endVal = pageRangeEndInput && pageRangeEndInput.value ? parseInt(pageRangeEndInput.value, 10) : NaN;
-  if (!isNaN(startVal) && startVal > 0) form.append("page_start", String(startVal));
-  if (!isNaN(endVal) && endVal > 0) form.append("page_end", String(endVal));
+  const range = getConfiguredPageRange();
+  if (range.start) form.append("page_start", String(range.start));
+  if (range.end) form.append("page_end", String(range.end));
 
   if (learnedPatterns && learnedPatterns.length > 0) {
     form.append("learned_patterns", JSON.stringify(learnedPatterns));
   }
 
+  const estimatedPages = (() => {
+    if (range.start && range.end) return Math.max(1, range.end - range.start + 1);
+    if (range.start && pageCountHint) return Math.max(1, pageCountHint - range.start + 1);
+    if (range.end) return range.end;
+    if (pageCountHint) return pageCountHint;
+    // Rough fallback when page count is unknown (large manuals).
+    return Math.max(200, Math.round(file.size / (80 * 1024)));
+  })();
+
+  // Full-book runs need many hours. Scale timeout; cap at 24h.
+  const timeoutMs = Math.min(
+    24 * 60 * 60 * 1000,
+    Math.max(2 * 60 * 60 * 1000, estimatedPages * 15 * 1000)
+  );
+
   progressStatus.innerText = `Sending to Python API (${apiBaseUrl})...`;
-  progressFill.style.width = "15%";
+  progressFill.style.width = "12%";
+  appendChatSystemMessage(
+    `Python API extracting **~${estimatedPages}** page(s)` +
+    `${parseStrategy === "ocr" ? " with **OCR Vision**" : " (native text)"}` +
+    ` via **${engineMode === "ollama" ? ollamaModel : geminiModel}**. ` +
+    `Large manuals can take a long time — keep this tab open.`
+  );
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min for large PDFs
+  const startedAt = Date.now();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const tickId = setInterval(() => {
+    const elapsed = formatElapsed(Date.now() - startedAt);
+    const pct = Math.min(70, 12 + Math.floor(((Date.now() - startedAt) / timeoutMs) * 55));
+    progressFill.style.width = `${pct}%`;
+    progressStatus.innerText =
+      `Python API still working… ${elapsed} elapsed` +
+      ` (~${estimatedPages} pages queued — every page is processed, max 5000).`;
+  }, 2000);
+
   let resp;
   try {
     resp = await fetch(`${apiBaseUrl}/api/extract`, {
@@ -148,10 +249,16 @@ async function extractViaPythonApi(file) {
       signal: controller.signal
     });
   } catch (err) {
-    if (err.name === "AbortError") throw new Error("Python API timed out.");
+    if (err.name === "AbortError") {
+      throw new Error(
+        `Python API timed out after ${formatElapsed(timeoutMs)}. ` +
+        `Use a smaller From/To page range, switch to Native text (if the PDF is searchable), or try Flash-Lite.`
+      );
+    }
     throw err;
   } finally {
     clearTimeout(timeoutId);
+    clearInterval(tickId);
   }
 
   if (!resp.ok) {
@@ -210,6 +317,7 @@ function applyApiExtractResult(result, file) {
   );
   renderGrid();
   isExtracting = false;
+  offerSaveExcelAfterExtraction(file);
 }
 
 // DOM Elements
@@ -2650,74 +2758,56 @@ filterTabs.addEventListener("click", (e) => {
 });
 
 /* -------------------------------------------------------------
- * 3. SheetJS High-Fidelity Excel Export
+ * 3. SheetJS High-Fidelity Excel Export (3 sheets in one workbook)
  * ------------------------------------------------------------- */
 
-exportBtn.addEventListener("click", () => {
-  if (activeRegistryTab === "maintenance") {
-    if (filteredMaintenance.length === 0) {
-      alert("No maintenance records to export.");
-      return;
-    }
+let lastSourceDocName = "";
 
-    const wb = XLSX.utils.book_new();
-    let exportMaint;
-    let colsMaint;
-    
-    if (activeEquipmentCategory === "Logbook") {
-      exportMaint = filteredMaintenance.map(r => ({
+function sanitizeExportBaseName(filename) {
+  const base = String(filename || "document").replace(/\.[^/.]+$/, "");
+  const cleaned = base
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || "document";
+}
+
+function buildMaintenanceExportRows(rows) {
+  if (activeEquipmentCategory === "Logbook") {
+    return {
+      data: rows.map(r => ({
         "Record ID": `#${r.id}`,
         "Date": r.date || "NA",
         "Maintenance Work Description": r.maintenance_work_description || "NA",
         "Parts Renewed": r.parts_renewed || "NA",
         "Attended By": r.attended_by || "NA",
         "Remarks": r.remarks || "NA",
-        "Source Page Reference": r.page === "NA" ? "NA" : `Page ${r.page}`
-      }));
-      colsMaint = [
-        { wch: 10 }, // ID
-        { wch: 15 }, // Date
-        { wch: 45 }, // Description
-        { wch: 25 }, // Parts
-        { wch: 20 }, // Attended By
-        { wch: 45 }, // Remarks
-        { wch: 15 }  // Page Reference
-      ];
-    } else {
-      exportMaint = filteredMaintenance.map(r => ({
-        "Record ID": `#${r.id}`,
-        "Equipment Title": r.equipment_title || "NA",
-        "Sub-system / Component": r.subsystem_component || "NA",
-        "Maintenance Routine / Interval": r.maintenance_routine || "NA",
-        "Required Maintenance Checks / Instructions": r.checks_instructions || "NA",
-        "Source Page Reference": r.page === "NA" ? "NA" : `Page ${r.page}`
-      }));
-      
-      colsMaint = [
-        { wch: 10 }, // ID
-        { wch: 22 }, // Equipment Title
-        { wch: 28 }, // Sub-system / Component
-        { wch: 25 }, // Routine / Interval
-        { wch: 65 }, // Checks / Instructions
-        { wch: 15 }  // Page Reference
-      ];
-    }
-    
-    const wsMaint = XLSX.utils.json_to_sheet(exportMaint);
-    wsMaint['!cols'] = colsMaint;
-    XLSX.utils.book_append_sheet(wb, wsMaint, "Maintenance Tasks");
+        "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
+      })),
+      cols: [
+        { wch: 10 }, { wch: 15 }, { wch: 45 }, { wch: 25 },
+        { wch: 20 }, { wch: 45 }, { wch: 15 }
+      ]
+    };
+  }
+  return {
+    data: rows.map(r => ({
+      "Record ID": `#${r.id}`,
+      "Equipment Title": r.equipment_title || "NA",
+      "Sub-system / Component": r.subsystem_component || "NA",
+      "Maintenance Routine / Interval": r.maintenance_routine || "NA",
+      "Required Maintenance Checks / Instructions": r.checks_instructions || "NA",
+      "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
+    })),
+    cols: [
+      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 25 }, { wch: 65 }, { wch: 15 }
+    ]
+  };
+}
 
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const filename = `OmniParse_Maintenance_Tasks_${dateStr}.xlsx`;
-    XLSX.writeFile(wb, filename);
-  } else if (activeRegistryTab === "spare_parts") {
-    if (filteredSpareParts.length === 0) {
-      alert("No spare parts records to export.");
-      return;
-    }
-
-    const wb = XLSX.utils.book_new();
-    const exportParts = filteredSpareParts.map(r => ({
+function buildSparePartsExportRows(rows) {
+  return {
+    data: rows.map(r => ({
       "Record ID": `#${r.id}`,
       "Equipment Title": r.equipment_title || "NA",
       "Sub-system / Component Location": r.subsystem_location || "NA",
@@ -2731,66 +2821,117 @@ exportBtn.addEventListener("click", () => {
       "Recommended Stock QTY": r.recommended_stock_qty || "NA",
       "Warranty Period": r.warranty_period || "NA",
       "Frequency of Use": r.frequency_of_use || "NA",
-      "Source Page Reference": r.page === "NA" ? "NA" : `Page ${r.page}`
-    }));
+      "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
+    })),
+    cols: [
+      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 28 },
+      { wch: 25 }, { wch: 22 }, { wch: 20 }, { wch: 20 }, { wch: 12 },
+      { wch: 15 }, { wch: 15 }, { wch: 22 }, { wch: 15 }
+    ]
+  };
+}
 
-    const wsParts = XLSX.utils.json_to_sheet(exportParts);
-    const colsParts = [
-      { wch: 10 }, // ID
-      { wch: 22 }, // Equipment Title
-      { wch: 28 }, // Location
-      { wch: 10 }, // Item No.
-      { wch: 28 }, // Name
-      { wch: 25 }, // Part Number
-      { wch: 22 }, // Drawing
-      { wch: 20 }, // OEM
-      { wch: 20 }, // Categorization
-      { wch: 12 }, // Quantity
-      { wch: 15 }, // Recommended Stock
-      { wch: 15 }, // Warranty Period
-      { wch: 22 }, // Frequency of Use
-      { wch: 15 }  // Page Reference
-    ];
-    wsParts['!cols'] = colsParts;
-    XLSX.utils.book_append_sheet(wb, wsParts, "Spare Parts & Components");
-
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const filename = `OmniParse_Spare_Parts_${dateStr}.xlsx`;
-    XLSX.writeFile(wb, filename);
-  } else if (activeRegistryTab === "troubleshooting") {
-    if (filteredTroubleshooting.length === 0) {
-      alert("No troubleshooting records to export.");
-      return;
-    }
-
-    const wb = XLSX.utils.book_new();
-    const exportTrouble = filteredTroubleshooting.map(r => ({
+function buildTroubleshootingExportRows(rows) {
+  return {
+    data: rows.map(r => ({
       "Record ID": `#${r.id}`,
       "Equipment Title": r.equipment_title || "NA",
       "Sub-system / Component": r.subsystem_component || "NA",
       "Problem / Symptom": r.problem || "NA",
       "Root Cause / Solution": r.root_cause_solution || "NA",
-      "Source Page Reference": r.page === "NA" ? "NA" : `Page ${r.page}`
-    }));
+      "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
+    })),
+    cols: [
+      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 35 }, { wch: 65 }, { wch: 15 }
+    ]
+  };
+}
 
-    const wsTrouble = XLSX.utils.json_to_sheet(exportTrouble);
-    const colsTrouble = [
-      { wch: 10 }, // ID
-      { wch: 22 }, // Equipment Title
-      { wch: 28 }, // Sub-system
-      { wch: 35 }, // Problem
-      { wch: 65 }, // Root Cause
-      { wch: 15 }  // Page Reference
-    ];
-    wsTrouble['!cols'] = colsTrouble;
-    XLSX.utils.book_append_sheet(wb, wsTrouble, "Troubleshooting");
-
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const filename = `OmniParse_Troubleshooting_${dateStr}.xlsx`;
-    XLSX.writeFile(wb, filename);
+function appendSheetOrEmpty(wb, sheetName, built) {
+  const rows = (built.data && built.data.length > 0)
+    ? built.data
+    : [{ Note: "No records extracted for this category." }];
+  const ws = XLSX.utils.json_to_sheet(rows);
+  if (built.data && built.data.length > 0 && built.cols) {
+    ws["!cols"] = built.cols;
+  } else {
+    ws["!cols"] = [{ wch: 50 }];
   }
-});
+  // Excel sheet names max 31 chars
+  XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
+}
 
+function buildCombinedWorkbook({ useFiltered = false } = {}) {
+  const maintRows = useFiltered ? filteredMaintenance : maintenanceRegistry;
+  const partsRows = useFiltered ? filteredSpareParts : sparePartsRegistry;
+  const troubleRows = useFiltered ? filteredTroubleshooting : troubleshootingRegistry;
+
+  const wb = XLSX.utils.book_new();
+  appendSheetOrEmpty(wb, "Maintenance Tasks", buildMaintenanceExportRows(maintRows));
+  appendSheetOrEmpty(wb, "Spare Parts", buildSparePartsExportRows(partsRows));
+  appendSheetOrEmpty(wb, "Troubleshooting", buildTroubleshootingExportRows(troubleRows));
+  return wb;
+}
+
+function getExportFileName(sourceFileName) {
+  return `${sanitizeExportBaseName(sourceFileName || lastSourceDocName || "document")}.xlsx`;
+}
+
+function exportCombinedWorkbook(sourceFileName, { ask = false, useFiltered = false } = {}) {
+  if (typeof XLSX === "undefined" || !XLSX.utils) {
+    alert("Excel library (SheetJS) failed to load. Refresh the page and try again.");
+    return false;
+  }
+
+  const total =
+    (useFiltered ? filteredMaintenance.length : maintenanceRegistry.length) +
+    (useFiltered ? filteredSpareParts.length : sparePartsRegistry.length) +
+    (useFiltered ? filteredTroubleshooting.length : troubleshootingRegistry.length);
+
+  if (total === 0) {
+    alert("No records to export yet.");
+    return false;
+  }
+
+  const filename = getExportFileName(sourceFileName);
+  if (ask) {
+    const ok = confirm(
+      `Save extraction results to your computer?\n\n` +
+      `Excel file: ${filename}\n\n` +
+      `One workbook with 3 sheets:\n` +
+      `• Maintenance Tasks\n` +
+      `• Spare Parts\n` +
+      `• Troubleshooting\n\n` +
+      `Using the uploaded document name avoids mixed/duplicate generic Excel names.`
+    );
+    if (!ok) return false;
+  }
+
+  const wb = buildCombinedWorkbook({ useFiltered });
+  XLSX.writeFile(wb, filename);
+  appendChatSystemMessage(
+    `Saved Excel workbook **${filename}** with **Maintenance**, **Spare Parts**, and **Troubleshooting** sheets.`
+  );
+  return true;
+}
+
+function offerSaveExcelAfterExtraction(fileOrName) {
+  const name = (fileOrName && fileOrName.name) ? fileOrName.name : (fileOrName || lastSourceDocName || "document");
+  // Let the progress overlay close / grid paint first, then ask.
+  setTimeout(() => {
+    exportCombinedWorkbook(name, { ask: true, useFiltered: false });
+  }, 500);
+}
+
+if (exportBtn) {
+  exportBtn.addEventListener("click", () => {
+    // Manual export: always all 3 sheets, named after the loaded document.
+    exportCombinedWorkbook(lastSourceDocName || "OmniParse_Export", {
+      ask: false,
+      useFiltered: false
+    });
+  });
+}
 /* -------------------------------------------------------------
  * 4. Document File Reader Scraper (PDF.js)
  * ------------------------------------------------------------- */
@@ -2867,6 +3008,7 @@ async function handleFileUpload(file) {
   sparePartsRegistry = [];
   troubleshootingRegistry = [];
   highlightRecordIds = [];
+  lastSourceDocName = file.name;
   renderGrid();
 
   // Claim the extraction lock immediately so a second file dropped during the
@@ -2882,14 +3024,52 @@ async function handleFileUpload(file) {
   try {
     // Prefer FastAPI for Gemini/Ollama PDF/TXT/image work; keep browser path otherwise.
     if (canUsePythonApiForFile(file, extension)) {
-      const apiUp = await checkPythonApiHealth();
-      if (apiUp) {
-        progressStatus.innerText = "Python API online — extracting...";
-        const result = await extractViaPythonApi(file);
+      progressStatus.innerText = "Checking Python API (5s timeout)...";
+      const apiHealth = await checkPythonApiHealth();
+      if (apiHealth.ok) {
+        if (apiHealth.busy) {
+          progressOverlay.classList.remove("active");
+          isExtracting = false;
+          alert(
+            "API is already busy with another extraction.\n\n" +
+            "In the API terminal press Ctrl+C, then run ./start-api.sh again.\n" +
+            "Then upload the full manual again (one job at a time)."
+          );
+          return;
+        }
+
+        let pageCountHint = null;
+        const range = getConfiguredPageRange();
+
+        if (extension === "pdf") {
+          // Page count helps the timeout estimate; skip if it takes too long on huge files.
+          try {
+            progressStatus.innerText = "Counting PDF pages (can take a minute on large manuals)...";
+            pageCountHint = await Promise.race([
+              countPdfPages(file),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("page-count-timeout")), 90000))
+            ]);
+          } catch (e) {
+            console.warn("Could not count PDF pages before upload:", e);
+            pageCountHint = null;
+          }
+          const okLarge = await confirmLargePdfIfNeeded(pageCountHint, file.size);
+          if (!okLarge) {
+            progressOverlay.classList.remove("active");
+            isExtracting = false;
+            appendChatSystemMessage("Extraction cancelled.");
+            return;
+          }
+        }
+        progressStatus.innerText = "Python API online — full-document extract started. Keep this tab open...";
+        const result = await extractViaPythonApi(file, pageCountHint);
         applyApiExtractResult(result, file);
         return;
       }
-      appendChatSystemMessage(`ℹ️ Python API not reachable at **${apiBaseUrl}** — using in-browser extractor. Start it with \`./start-api.sh\`.`);
+      appendChatSystemMessage(
+        `ℹ️ Python API not reachable at **${apiBaseUrl}** (busy, down, or frozen). ` +
+        `Press **Ctrl+C** in the API terminal, run \`./start-api.sh\` again, or continuing with in-browser extractor.`
+      );
     } else if (engineMode === "heuristics") {
       appendChatSystemMessage("ℹ️ Heuristics mode uses the in-browser extractor.");
     } else if (extension === "doc" || extension === "docx") {
@@ -2998,10 +3178,6 @@ function extractTXTText(file) {
                 appendChatSystemMessage("Extraction aborted by user.");
                 break;
               }
-              if (!shouldProcessPageWithLLM(chunks[idx], 1)) {
-                console.log(`Skipping chunk ${idx + 1} of ${chunks.length}: no relevant keywords.`);
-                continue;
-              }
               llmChunksProcessed++;
               progressStatus.innerText = `Processing chunk ${idx + 1} of ${chunks.length} with ${engineLabel}...`;
               progressFill.style.width = `${Math.round(((idx + 1) / chunks.length) * 100)}%`;
@@ -3028,9 +3204,6 @@ function extractTXTText(file) {
               renderGrid();
             }
           } else {
-            if (!shouldProcessPageWithLLM(text, 1)) {
-              appendChatSystemMessage(`Skipped processing manual text with ${engineLabel}: no relevant keywords found.`);
-            } else {
               llmChunksProcessed = 1;
               totalChunksCount = 1;
               progressStatus.innerText = `Extracting using ${engineLabel}...`;
@@ -3054,7 +3227,6 @@ function extractTXTText(file) {
                 result.troubleshooting.forEach((r, rIdx) => r.id = startingId + rIdx);
                 troubleshootingRegistry = [...troubleshootingRegistry, ...result.troubleshooting];
               }
-            }
           }
         } else {
           // Heuristics Mode
@@ -3094,6 +3266,7 @@ function extractTXTText(file) {
           appendChatSystemMessage(`Successfully parsed text manual **"${file.name}"** using **${labelModeText}**! Extracted **${maintCount}** tasks, **${sparesCount}** spare parts, and **${troubleCount}** troubleshooting issues into the registries.`);
           renderGrid();
           isExtracting = false;
+          offerSaveExcelAfterExtraction(file);
           resolve();
         }, 1000);
         
@@ -3129,13 +3302,19 @@ function extractTXTText(file) {
 // [start, end] range for the given document. Blank/invalid inputs fall back
 // to parsing the entire document (start=1, end=totalPages).
 function resolvePageRange(totalPages) {
+  const MAX_PAGES = 5000;
   let start = parseInt(pageRangeStartInput && pageRangeStartInput.value, 10);
   let end = parseInt(pageRangeEndInput && pageRangeEndInput.value, 10);
   const hasStart = !isNaN(start) && start > 0;
   const hasEnd = !isNaN(end) && end > 0;
 
   if (!hasStart && !hasEnd) {
-    return { start: 1, end: totalPages, isPartial: false };
+    const cappedEnd = Math.min(totalPages, MAX_PAGES);
+    return {
+      start: 1,
+      end: cappedEnd,
+      isPartial: cappedEnd < totalPages
+    };
   }
 
   if (!hasStart) start = 1;
@@ -3148,6 +3327,11 @@ function resolvePageRange(totalPages) {
     const tmp = start;
     start = end;
     end = tmp;
+  }
+
+  if ((end - start + 1) > MAX_PAGES) {
+    end = start + MAX_PAGES - 1;
+    end = Math.min(end, totalPages);
   }
 
   return { start, end, isPartial: (start !== 1 || end !== totalPages) };
@@ -3242,7 +3426,6 @@ function extractPDFText(file) {
         let compiledText = "";
         const counts = { maint: 0, spares: 0, trouble: 0 };
         let llmPagesProcessed = 0;
-        let prevPageWasIndex = false;
         const llmJobs = [];
         const useLLM = engineMode === "ollama" || engineMode === "gemini";
         const engineLabel = engineMode === "gemini" ? "Gemini" : "Ollama";
@@ -3306,18 +3489,6 @@ function extractPDFText(file) {
           loadedPages.push({ pageNum, text: pageText });
           compiledText += ` ${pageText}`;
 
-          // Never treat OCR-placeholder pages as TOC/index (no real text to classify).
-          const tocProbe = nativePageText && nativePageText.trim().length > 40 ? nativePageText : "";
-          const isIndexPage = tocProbe ? isLikelyIndexOrTOCPage(tocProbe, pageNum) : false;
-          const indexProbe = tocProbe || "";
-          const isLikelyContinuation = prevPageWasIndex && pageNum <= 8 && (indexProbe.match(/(?:\.{2,}\s*)?\d{1,3}\b/g) || []).length >= 5;
-          if (isIndexPage || isLikelyContinuation) {
-            prevPageWasIndex = true;
-            console.log(`Skipping Page ${pageNum}: detected as TOC/Index page.`);
-            continue;
-          }
-          prevPageWasIndex = false;
-
           if (useLLM) {
             if (engineMode === "ollama" && useOcr && pageNum === rangeStart) {
               const lowerModel = ollamaModel.toLowerCase();
@@ -3325,10 +3496,7 @@ function extractPDFText(file) {
                 appendChatSystemMessage(`⚠️ **Model Warning**: You are using OCR Vision mode with **${ollamaModel}**, which appears to be a text-only model! Vision extraction will fail and return 0 results. Please select a vision model (e.g., \`llama3.2-vision\` or \`llava\`).`);
               }
             }
-            if (!useOcr && !shouldProcessPageWithLLM(pageText, pageNum)) {
-              console.log(`Skipping Page ${pageNum} in ${engineLabel} mode: no high-value maintenance/parts keywords found.`);
-              continue;
-            }
+            // Process every page — no TOC / keyword skipping.
             llmJobs.push({
               pageNum,
               pageText, // full page text — no truncation
@@ -3419,6 +3587,7 @@ function extractPDFText(file) {
           
           renderGrid();
           isExtracting = false;
+          offerSaveExcelAfterExtraction(file);
           resolve();
         }, 400);
 
@@ -3495,6 +3664,7 @@ async function extractImageText(file) {
           
           renderGrid();
           isExtracting = false;
+          offerSaveExcelAfterExtraction(file);
           resolve();
         }, 1200);
 
@@ -4246,10 +4416,16 @@ function initApp() {
   }
 
   // Surface API availability in the header status label
-  checkPythonApiHealth().then(ok => {
+  checkPythonApiHealth().then(health => {
     const label = document.querySelector(".status-label");
     if (!label) return;
-    label.textContent = ok ? "Python API Ready" : "Browser Engine Ready";
+    if (health.ok && health.busy) {
+      label.textContent = "API Busy (extracting)";
+    } else if (health.ok) {
+      label.textContent = "Python API Ready";
+    } else {
+      label.textContent = "Browser Engine Ready";
+    }
   });
 }
 
