@@ -165,10 +165,12 @@ Resources:
           }
 
   # ----- Logs -----
+  # Name includes "-api" so a new stack can create after an orphaned
+  # /ecs/${ProjectName} was retained (DELETE_FAILED without logs:DeleteLogGroup).
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/ecs/${ProjectName}"
+      LogGroupName: !Sub "/ecs/${ProjectName}-api"
       RetentionInDays: 14
 
   # ----- IAM -----

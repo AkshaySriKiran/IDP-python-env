@@ -46,6 +46,17 @@ if [[ -n "$GEMINI_API_KEY" ]]; then
   params+=("GeminiApiKey=$GEMINI_API_KEY")
 fi
 
+STATUS="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
+if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "DELETE_FAILED" ]]; then
+  echo "Stack $STACK_NAME is $STATUS (often an orphaned LogGroup)." >&2
+  echo "Clear it, then re-run this script:" >&2
+  echo "  aws cloudformation delete-stack --stack-name $STACK_NAME --region $AWS_REGION --retain-resources LogGroup" >&2
+  echo "  aws cloudformation wait stack-delete-complete --stack-name $STACK_NAME --region $AWS_REGION" >&2
+  echo "Optional (needs logs:DeleteLogGroup):" >&2
+  echo "  aws logs delete-log-group --log-group-name /ecs/${PROJECT_NAME} --region $AWS_REGION" >&2
+  exit 1
+fi
+
 echo "==> CloudFormation deploy (DesiredCount=0 until Mac pushes the image)..."
 aws cloudformation deploy \
   --stack-name "$STACK_NAME" \
