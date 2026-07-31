@@ -89,10 +89,20 @@ initThemeToggle();
  * Browser extractor remains for heuristics, Word/DOCX, and API-down fallback.
  * ------------------------------------------------------------- */
 const API_BASE_KEY = "omniparse_api_base";
-let apiBaseUrl = "http://127.0.0.1:8001";
+/** Local UI → local FastAPI. CloudFront UI → same-origin /api/* (ALB via CF). */
+function defaultApiBaseUrl() {
+  try {
+    const host = typeof location !== "undefined" ? location.hostname : "";
+    if (host && host !== "localhost" && host !== "127.0.0.1") return "";
+  } catch (e) {}
+  return "http://127.0.0.1:8001";
+}
+let apiBaseUrl = defaultApiBaseUrl();
 try {
   const savedApiBase = localStorage.getItem(API_BASE_KEY);
-  if (savedApiBase) apiBaseUrl = savedApiBase.replace(/\/$/, "");
+  if (savedApiBase !== null && savedApiBase !== undefined) {
+    apiBaseUrl = String(savedApiBase).replace(/\/$/, "");
+  }
 } catch (e) {}
 
 async function checkPythonApiHealth() {

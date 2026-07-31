@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+!infra/.env.deploy.example
+infra/.env.deploy
 *.pem
 *.key
 *credentials*.json

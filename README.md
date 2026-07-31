@@ -117,6 +117,34 @@ curl -I http://localhost:8000/
 
 ---
 
+## Deploy to AWS (ECS Fargate — recommended)
+
+Static UI on **S3 + CloudFront**; FastAPI on **ECS Fargate** behind an **ALB**. CloudFront proxies `/api/*` to the ALB (same-origin HTTPS).
+
+**Prerequisites:** AWS CLI v2, Docker, IAM rights for CloudFormation / ECS / ECR / S3 / CloudFront / Secrets Manager.
+
+```bash
+export AWS_REGION=us-east-1
+export GEMINI_API_KEY="your_key_here"   # optional; UI can still paste a key
+chmod +x infra/deploy.sh
+./infra/deploy.sh
+```
+
+The script creates/updates the CloudFormation stack, builds and pushes the API image to ECR, scales the Fargate service, syncs the UI to S3, and invalidates CloudFront. When it finishes, open the printed `CloudFrontUrl` and confirm header status shows **Python API Ready**.
+
+| Piece | AWS |
+|-------|-----|
+| `index.html` / `app.js` / `styles.css` | S3 → CloudFront |
+| `backend/` FastAPI | ECR → ECS Fargate → ALB |
+| `GEMINI_API_KEY` | Secrets Manager |
+| Logs | CloudWatch `/ecs/omniparse-idp` |
+
+**Note:** CloudFront’s custom-origin read timeout max is **180 seconds**. Use page ranges for long OCR jobs, or later put an HTTPS ALB on a custom domain for longer requests.
+
+Tear down: `aws cloudformation delete-stack --stack-name omniparse-idp`
+
+---
+
 ## Project layout
 
 ```text
@@ -127,8 +155,13 @@ curl -I http://localhost:8000/
 ├── equipment_manifest.json # Domain keywords / normalization
 ├── start.sh                # UI server :8000
 ├── start-api.sh            # FastAPI server :8001
+├── infra/
+│   ├── cloudformation.yml  # Fargate + ALB + S3/CloudFront
+│   ├── deploy.sh           # One-shot deploy
+│   └── .env.deploy.example
 ├── scripts/                # Scratch / one-off test scripts
 └── backend/
+    ├── Dockerfile
     ├── app/
     │   ├── main.py
     │   ├── extractors/
