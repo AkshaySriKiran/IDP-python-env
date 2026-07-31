@@ -98,7 +98,7 @@ echo "Deploy complete (Mac push + CloudShell finish)."
 echo "  UI + API:  $CF_URL"
 echo "  Health:    ${CF_URL}/api/health"
 echo "  ECR image: $ECR_URI:$IMAGE_TAG"
-echo "  Logs:      /ecs/${PROJECT_NAME}  (CloudWatch, region $AWS_REGION)"
+echo "  Logs:      /ecs/${PROJECT_NAME}-api  (CloudWatch, region $AWS_REGION)"
 echo
 echo "Smoke-test: open CloudFront URL → header should show Python API Ready."
 echo "Note: CloudFront origin timeout max is 180s — use page ranges for long OCR."

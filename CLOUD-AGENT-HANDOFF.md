@@ -81,7 +81,7 @@ Later: Bedrock, ACM+Route53 (custom domain / >180s API timeout), PrivateLink.
 1. Prefer **Mac + CloudShell** path if laptop AWS CLI login stays broken — follow `infra/MAC-CLOUDSHELL.md`  
 2. Or confirm AWS CLI works here: `aws sts get-caller-identity` in `eu-north-1`, then `./infra/deploy.sh`  
 3. Smoke-test CloudFront URL → header shows **Python API Ready** → small PDF extract  
-4. Document live URL + CloudWatch log group for the team (`/ecs/omniparse-idp`)  
+4. Document live URL + CloudWatch log group for the team (`/ecs/omniparse-idp-api`)  
 5. Later (separate phase): swap Gemini extractor for Bedrock; keep same API contract  
 
 ## Do not do yet

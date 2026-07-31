@@ -98,7 +98,7 @@ export IMAGE_TAG=abc1234   # same as Mac
 
 Open the printed **CloudFront URL** → header should show **Python API Ready** → try a small PDF.
 
-Logs: CloudWatch log group `/ecs/omniparse-idp` in `eu-north-1`.
+Logs: CloudWatch log group `/ecs/omniparse-idp-api` in `eu-north-1`.
 
 ---
 

@@ -147,7 +147,7 @@ The script creates/updates the CloudFormation stack, builds and pushes the API i
 | `index.html` / `app.js` / `styles.css` | S3 → CloudFront |
 | `backend/` FastAPI | ECR → ECS Fargate → ALB |
 | `GEMINI_API_KEY` | Secrets Manager |
-| Logs | CloudWatch `/ecs/omniparse-idp` |
+| Logs | CloudWatch `/ecs/omniparse-idp-api` |
 
 **Note:** CloudFront’s custom-origin read timeout max is **180 seconds**. Use page ranges for long OCR jobs, or later put an HTTPS ALB on a custom domain for longer requests.
 
