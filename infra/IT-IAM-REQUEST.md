@@ -2,7 +2,7 @@
 
 ## Account / identity
 
-- Account: `912564796433`
+- Account: `9125XXXX6433`
 - IAM user: `App@Team`
 - Region: **`eu-north-1`** (Stockholm)
 - Stack name: `omniparse-idp`
