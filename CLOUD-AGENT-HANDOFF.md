@@ -46,7 +46,16 @@ Migrate OmniParse IDP to AWS for a **pilot**:
    - CloudShell (eu-north-1): `./infra/cloudshell-phase1.sh` → print ECR password  
    - Mac Docker: paste password → `./infra/mac-push-ecr.sh`  
    - CloudShell: `./infra/cloudshell-phase3.sh`  
-   - Guide: `infra/MAC-CLOUDSHELL.md`
+   - Guide: `infra/MAC-CLOUDSHELL.md`  
+
+**Phase1 blocked (2026-07-31):** `App@Team` lacks IAM for deploy. Confirmed failures:
+
+- `ecr:CreateRepository` AccessDenied  
+- `secretsmanager:CreateSecret` AccessDenied  
+- EC2 VPC/IGW `UnauthorizedTaggingOperation` (needs `ec2:CreateTags`)  
+- Stack status was `ROLLBACK_FAILED`  
+
+Send IT: `infra/IT-IAM-REQUEST.md` + `infra/iam-pilot-policy.json`. Do not retry phase1 until policy is attached.
 
 ## Services requested for this project
 
