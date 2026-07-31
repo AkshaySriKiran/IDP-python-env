@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# CloudShell helper: remove a stuck omniparse-idp stack (e.g. ROLLBACK_FAILED).
-# If LogGroup delete is denied, retains it so the stack can still be removed.
+# CloudShell helper: remove a stuck omniparse-idp stack (e.g. ROLLBACK_FAILED / DELETE_FAILED).
+# If LogGroup (or other) delete is denied, retains only currently DELETE_FAILED resources.
 #
 # Usage:
 #   ./infra/cloudshell-cleanup-stack.sh
@@ -25,6 +25,30 @@ STATUS="$(aws cloudformation describe-stacks \
   --output text)"
 echo "==> Stack $STACK_NAME status: $STATUS"
 
+current_delete_failed() {
+  aws cloudformation describe-stack-resources \
+    --stack-name "$STACK_NAME" \
+    --query "StackResources[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
+    --output text 2>/dev/null | tr '\t' '\n' | awk 'NF && $0 != "'"$STACK_NAME"'"' | sort -u | xargs || true
+}
+
+# Already stuck: skip a doomed normal delete and retain only live DELETE_FAILED resources.
+if [[ "$STATUS" == "DELETE_FAILED" || "$STATUS" == "ROLLBACK_FAILED" ]]; then
+  FAILED="$(current_delete_failed)"
+  if [[ -z "$FAILED" ]]; then
+    FAILED="LogGroup"
+  fi
+  echo "==> Retaining currently DELETE_FAILED resources: $FAILED"
+  # shellcheck disable=SC2086
+  aws cloudformation delete-stack \
+    --stack-name "$STACK_NAME" \
+    --retain-resources $FAILED
+  echo "==> Waiting for delete..."
+  aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+  echo "Stack $STACK_NAME removed. Retained: $FAILED"
+  exit 0
+fi
+
 echo "==> Attempting normal delete..."
 aws cloudformation delete-stack --stack-name "$STACK_NAME" || true
 
@@ -33,19 +57,22 @@ if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" 2>/d
   exit 0
 fi
 
-echo "==> Normal delete did not finish. Checking DELETE_FAILED resources..."
-FAILED="$(aws cloudformation describe-stack-events \
+STATUS="$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
-  --query "StackEvents[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
-  --output text 2>/dev/null | tr '\t' '\n' | sort -u | tr '\n' ' ' || true)"
-FAILED="$(echo "$FAILED" | xargs)"
+  --query 'Stacks[0].StackStatus' \
+  --output text 2>/dev/null || true)"
 
+if [[ -z "$STATUS" || "$STATUS" == "None" ]]; then
+  echo "Stack deleted."
+  exit 0
+fi
+
+FAILED="$(current_delete_failed)"
 if [[ -z "$FAILED" ]]; then
-  # Common stuck case for this pilot
   FAILED="LogGroup"
 fi
 
-echo "==> Retaining resources and deleting stack: $FAILED"
+echo "==> Normal delete stuck ($STATUS). Retaining: $FAILED"
 # shellcheck disable=SC2086
 aws cloudformation delete-stack \
   --stack-name "$STACK_NAME" \
@@ -54,5 +81,4 @@ aws cloudformation delete-stack \
 echo "==> Waiting for delete (retained resources are left in the account)..."
 aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
 echo "Stack $STACK_NAME removed. Retained: $FAILED"
-echo "IT can later delete orphan log group /ecs/omniparse-idp if present."
-echo "New stacks use /ecs/omniparse-idp-api so create can proceed without deleting the orphan."
+echo "Orphan log groups (if any) can stay; new stacks use /ecs/omniparse-idp-api."
