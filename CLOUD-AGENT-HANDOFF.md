@@ -39,7 +39,14 @@ Migrate OmniParse IDP to AWS for a **pilot**:
 | Live CloudFront URL | Not yet |
 | Bedrock | Not started (after Gemini pilot is stable) |
 
-**Unblock:** inject AWS credentials into the Cloud Agent environment (access key env vars, shared credentials file, or working SSO), then re-run from task 1 below.
+**Unblock options:**
+
+1. Inject AWS credentials into the Cloud Agent (access keys / SSO), then `./infra/deploy.sh`  
+2. **Mac Docker + CloudShell password** (no local AWS CLI login) — preferred while laptop `aws login` is broken:  
+   - CloudShell (eu-north-1): `./infra/cloudshell-phase1.sh` → print ECR password  
+   - Mac Docker: paste password → `./infra/mac-push-ecr.sh`  
+   - CloudShell: `./infra/cloudshell-phase3.sh`  
+   - Guide: `infra/MAC-CLOUDSHELL.md`
 
 ## Services requested for this project
 
@@ -62,18 +69,11 @@ Later: Bedrock, ACM+Route53 (custom domain / >180s API timeout), PrivateLink.
 
 ## Next tasks for Cloud Agent / engineer
 
-1. Confirm AWS CLI works: `aws sts get-caller-identity` in `eu-north-1`  
-   - **Blocked:** needs credentials from IT / laptop (see above)  
-2. Confirm Docker is running — **done** in this agent (re-start `dockerd` if the VM has no systemd)  
-3. Deploy (**only after step 1 succeeds**):  
-   ```bash
-   export AWS_REGION=eu-north-1
-   export GEMINI_API_KEY="..."   # optional; UI can paste key
-   ./infra/deploy.sh
-   ```  
-4. Smoke-test CloudFront URL → header shows **Python API Ready** → small PDF extract  
-5. Document live URL + CloudWatch log group for the team (`/ecs/omniparse-idp`)  
-6. Later (separate phase): swap Gemini extractor for Bedrock; keep same API contract  
+1. Prefer **Mac + CloudShell** path if laptop AWS CLI login stays broken — follow `infra/MAC-CLOUDSHELL.md`  
+2. Or confirm AWS CLI works here: `aws sts get-caller-identity` in `eu-north-1`, then `./infra/deploy.sh`  
+3. Smoke-test CloudFront URL → header shows **Python API Ready** → small PDF extract  
+4. Document live URL + CloudWatch log group for the team (`/ecs/omniparse-idp`)  
+5. Later (separate phase): swap Gemini extractor for Bedrock; keep same API contract  
 
 ## Do not do yet
 
@@ -81,7 +81,8 @@ Later: Bedrock, ACM+Route53 (custom domain / >180s API timeout), PrivateLink.
 - Add Vertex AI  
 - Implement Bedrock until pilot Gemini deploy is stable  
 - Force-push or change AWS account settings  
-- Deploy while `aws sts get-caller-identity` fails  
+- Run `./infra/deploy.sh` in Cloud Agent while `aws sts get-caller-identity` fails  
+  (CloudShell path is fine — that shell already has console credentials)  
 
 ## Quick local verify (optional)
 

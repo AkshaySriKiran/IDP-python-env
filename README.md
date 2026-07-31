@@ -134,6 +134,12 @@ chmod +x infra/deploy.sh
 **LLM now:** Gemini API (key in Secrets Manager or UI). **Bedrock** is a later phase.  
 **Gate:** deploy refuses to run until `aws sts get-caller-identity` succeeds.
 
+### Alternate: Mac Docker + CloudShell (no local AWS login)
+
+If local `aws login` / access keys are blocked, use browser **CloudShell** for AWS API calls and **Docker on a Mac** only for build/push. ECR auth is a password from CloudShell pasted into `docker login` on the Mac.
+
+See **[`infra/MAC-CLOUDSHELL.md`](infra/MAC-CLOUDSHELL.md)** (`cloudshell-phase1.sh` → `mac-push-ecr.sh` → `cloudshell-phase3.sh`).
+
 The script creates/updates the CloudFormation stack, builds and pushes the API image to ECR, scales the Fargate service, syncs the UI to S3, and invalidates CloudFront. When it finishes, open the printed `CloudFrontUrl` and confirm header status shows **Python API Ready**.
 
 | Piece | AWS |
@@ -161,7 +167,11 @@ Tear down: `aws cloudformation delete-stack --stack-name omniparse-idp`
 ├── start-api.sh            # FastAPI server :8001
 ├── infra/
 │   ├── cloudformation.yml  # Fargate + ALB + S3/CloudFront
-│   ├── deploy.sh           # One-shot deploy
+│   ├── deploy.sh           # One-shot deploy (needs local AWS CLI)
+│   ├── MAC-CLOUDSHELL.md   # Mac Docker + CloudShell (no local AWS login)
+│   ├── cloudshell-phase1.sh
+│   ├── cloudshell-phase3.sh
+│   ├── mac-push-ecr.sh
 │   └── .env.deploy.example
 ├── scripts/                # Scratch / one-off test scripts
 └── backend/
