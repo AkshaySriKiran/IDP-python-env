@@ -15,7 +15,11 @@ CloudFormation create failed with:
 2. `secretsmanager:CreateSecret` — **AccessDenied**
 3. EC2 VPC / InternetGateway — **UnauthorizedTaggingOperation** (needs `ec2:CreateTags`)
 
-Stack ended in `ROLLBACK_FAILED`.
+Stack ended in `ROLLBACK_FAILED`. Cleanup then also failed with:
+
+4. `logs:DeleteLogGroup` on `/ecs/omniparse-idp` — **AccessDenied**
+
+(User can remove the stack with `--retain-resources LogGroup`, but IT should still grant log group delete.)
 
 ## Ask
 
