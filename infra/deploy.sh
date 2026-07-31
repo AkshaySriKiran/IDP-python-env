@@ -6,7 +6,7 @@
 #   - docker running
 #
 # Usage:
-#   export AWS_REGION=us-east-1
+#   export AWS_REGION=eu-north-1
 #   export GEMINI_API_KEY=your_key   # optional; UI can still paste a key
 #   ./infra/deploy.sh
 
@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STACK_NAME="${STACK_NAME:-omniparse-idp}"
 PROJECT_NAME="${PROJECT_NAME:-omniparse-idp}"
-AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-north-1}}"
 IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.5-flash}"
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
@@ -26,6 +26,21 @@ export GEMINI_API_KEY GEMINI_MODEL
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1" >&2; exit 1; }; }
 need aws
 need docker
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker daemon is not reachable. Start Docker, then retry." >&2
+  exit 1
+fi
+
+echo "==> Checking AWS credentials (sts get-caller-identity) in $AWS_REGION..."
+if ! ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)"; then
+  echo "AWS credentials are not configured (sts get-caller-identity failed)." >&2
+  echo "Configure access keys or SSO for account 912564796433, region eu-north-1, then retry." >&2
+  echo "Do not deploy until: aws sts get-caller-identity" >&2
+  exit 1
+fi
+CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+echo "==> AWS identity OK: account=$ACCOUNT_ID arn=$CALLER_ARN"
 
 echo "==> Region: $AWS_REGION | Stack: $STACK_NAME | Image tag: $IMAGE_TAG"
 
@@ -81,7 +96,6 @@ echo "==> ECR: $ECR_URI"
 echo "==> UI bucket: $UI_BUCKET"
 
 # ----- 2) Build & push API image (before pointing ECS at the new tag) -----
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 echo "==> ECR login..."
 aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
