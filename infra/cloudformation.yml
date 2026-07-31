@@ -46,15 +46,14 @@ Parameters:
 
 Resources:
   # ----- Networking -----
+  # Note: EC2 Name tags omitted — App@Team hit UnauthorizedTaggingOperation
+  # when CreateTags was denied. Tagging can be restored after IT grants ec2:CreateTags.
   VPC:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.40.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-vpc"
 
   PublicSubnet1:
     Type: AWS::EC2::Subnet
@@ -63,9 +62,6 @@ Resources:
       AvailabilityZone: !Select [0, !GetAZs ""]
       CidrBlock: 10.40.0.0/24
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-public-a"
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -74,16 +70,9 @@ Resources:
       AvailabilityZone: !Select [1, !GetAZs ""]
       CidrBlock: 10.40.1.0/24
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-public-b"
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-igw"
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -95,9 +84,6 @@ Resources:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-public-rt"
 
   PublicRoute:
     Type: AWS::EC2::Route
@@ -131,9 +117,6 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
           Description: HTTP origin for CloudFront
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-alb-sg"
 
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -145,9 +128,6 @@ Resources:
           FromPort: 8001
           ToPort: 8001
           SourceSecurityGroupId: !Ref AlbSecurityGroup
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-svc-sg"
 
   # ----- Secrets -----
   AppSecret:
