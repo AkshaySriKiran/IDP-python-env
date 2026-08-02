@@ -35,8 +35,9 @@ Migrate OmniParse IDP to AWS for a **pilot**:
 | `AWS_REGION=eu-north-1` | Set as default in `infra/deploy.sh` / `.env.deploy.example` / README |
 | `aws sts get-caller-identity` | **FAIL — NoCredentials** (no access keys / SSO in this environment) |
 | Docker daemon | Done (docker.io 29.x; started manually when no systemd) |
-| Deploy (`./infra/deploy.sh`) | **Not run** — gated until STS works |
-| Live CloudFront URL | Not yet |
+| Deploy (`./infra/deploy.sh`) | Done by team (Windows/Mac + AWS CLI) |
+| Live CloudFront URL | https://d11bl7hg497hj.cloudfront.net/ |
+| API health | `GET /api/health` → `{"status":"ok",...}` (verified 2026-08-02) |
 | Bedrock | Not started (after Gemini pilot is stable) |
 
 **Unblock options:**
@@ -76,13 +77,18 @@ Later: Bedrock, ACM+Route53 (custom domain / >180s API timeout), PrivateLink.
 - Large manuals: up to ~1GB / 5000 pages; full-book runs are slow/expensive  
 - Do **not** treat BRD enterprise features (RBAC, virus scan, approval queue, Vertex) as already built  
 
+## Live pilot (verified 2026-08-02)
+
+- **UI + API:** https://d11bl7hg497hj.cloudfront.net/  
+- **Health:** https://d11bl7hg497hj.cloudfront.net/api/health → `status: ok`  
+- Static assets (`app.js`, `styles.css`, `equipment_manifest.json`) return HTTP 200 via CloudFront→S3  
+- Logs: CloudWatch `/ecs/omniparse-idp-api` (confirm region in the account that owns this distribution)
+
 ## Next tasks for Cloud Agent / engineer
 
-1. Prefer **Mac + CloudShell** path if laptop AWS CLI login stays broken — follow `infra/MAC-CLOUDSHELL.md`  
-2. Or confirm AWS CLI works here: `aws sts get-caller-identity` in `eu-north-1`, then `./infra/deploy.sh`  
-3. Smoke-test CloudFront URL → header shows **Python API Ready** → small PDF extract  
-4. Document live URL + CloudWatch log group for the team (`/ecs/omniparse-idp-api`)  
-5. Later (separate phase): swap Gemini extractor for Bedrock; keep same API contract  
+1. Smoke-test in browser: header **Python API Ready** → small PDF extract (Gemini key in UI if needed)  
+2. Confirm deploy region for this live URL (eu-west-1 vs eu-north-1) and align docs/scripts  
+3. Later (separate phase): swap Gemini extractor for Bedrock; keep same API contract  
 
 ## Do not do yet
 
