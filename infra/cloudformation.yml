@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  OmniParse IDP — Option 2: S3 + CloudFront (UI) and ECS Fargate + ALB (FastAPI).
-  CloudFront routes /api/* to the ALB so the browser uses same-origin API calls.
+  OmniParse IDP — S3 + CloudFront (UI) and ECS Fargate + ALB (FastAPI).
+  Uses an EXISTING company VPC (My-VPC01). Does not create VPC / IGW / NAT / routes.
 
 Parameters:
   ProjectName:
@@ -9,6 +9,26 @@ Parameters:
     Default: omniparse-idp
     AllowedPattern: "[a-z0-9-]+"
     Description: Lowercase name prefix for resources
+
+  ExistingVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Company VPC to deploy into (e.g. My-VPC01)
+
+  PublicSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet AZ-a for ALB (IGW route)
+
+  PublicSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet AZ-b for ALB (IGW route)
+
+  PrivateSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet AZ-a for Fargate (NAT route)
+
+  PrivateSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet AZ-b for Fargate (NAT route)
 
   GeminiApiKey:
     Type: String
@@ -45,72 +65,12 @@ Parameters:
     Description: ECR image tag to run (update after each push)
 
 Resources:
-  # ----- Networking -----
-  # Note: EC2 Name tags omitted — App@Team hit UnauthorizedTaggingOperation
-  # when CreateTags was denied. Tagging can be restored after IT grants ec2:CreateTags.
-  VPC:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: 10.40.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-
-  PublicSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      CidrBlock: 10.40.0.0/24
-      MapPublicIpOnLaunch: true
-
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      CidrBlock: 10.40.1.0/24
-      MapPublicIpOnLaunch: true
-
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
-
-  AttachGateway:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId: !Ref VPC
-      InternetGatewayId: !Ref InternetGateway
-
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-
-  PublicRoute:
-    Type: AWS::EC2::Route
-    DependsOn: AttachGateway
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  Subnet1RouteAssoc:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet1
-      RouteTableId: !Ref PublicRouteTable
-
-  Subnet2RouteAssoc:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet2
-      RouteTableId: !Ref PublicRouteTable
-
-  # ----- Security groups -----
+  # ----- Security groups (only new network objects we create) -----
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: ALB ingress HTTP from CloudFront / internet
-      VpcId: !Ref VPC
+      VpcId: !Ref ExistingVpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -121,8 +81,8 @@ Resources:
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Fargate tasks — API port from ALB only
-      VpcId: !Ref VPC
+      GroupDescription: Fargate tasks - API port from ALB only
+      VpcId: !Ref ExistingVpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 8001
@@ -170,8 +130,9 @@ Resources:
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
+      # No RetentionInDays — App@Team may lack logs:PutRetentionPolicy.
+      # IT can set retention later in console once permissions allow.
       LogGroupName: !Sub "/ecs/${ProjectName}-api"
-      RetentionInDays: 14
 
   # ----- IAM -----
   ExecutionRole:
@@ -226,20 +187,19 @@ Resources:
       Scheme: internet-facing
       Type: application
       Subnets:
-        - !Ref PublicSubnet1
-        - !Ref PublicSubnet2
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
       SecurityGroups:
         - !Ref AlbSecurityGroup
-      LoadBalancerAttributes:
-        # Match CloudFront origin read timeout (max 180s for custom origins)
-        - Key: idle_timeout.timeout_seconds
-          Value: "180"
+      # LoadBalancerAttributes omitted — App@Team may lack
+      # elasticloadbalancing:ModifyLoadBalancerAttributes.
+      # Default idle timeout is 60s; IT can raise to 180s in console later.
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub "${ProjectName}-api"
-      VpcId: !Ref VPC
+      VpcId: !Ref ExistingVpcId
       Port: 8001
       Protocol: HTTP
       TargetType: ip
@@ -251,9 +211,8 @@ Resources:
       UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: "200"
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: "30"
+      # TargetGroupAttributes omitted — App@Team may lack
+      # elasticloadbalancing:ModifyTargetGroupAttributes. Default deregistration delay is fine.
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -337,10 +296,11 @@ Resources:
       HealthCheckGracePeriodSeconds: 90
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
+          # Private subnets: outbound via company NAT (ECR + Gemini). No public IP.
+          AssignPublicIp: DISABLED
           Subnets:
-            - !Ref PublicSubnet1
-            - !Ref PublicSubnet2
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
           SecurityGroups:
             - !Ref ServiceSecurityGroup
       LoadBalancers:
@@ -412,9 +372,10 @@ Resources:
             CustomOriginConfig:
               HTTPPort: 80
               OriginProtocolPolicy: http-only
-              # CloudFront hard max for custom origin read timeout
-              OriginReadTimeout: 180
-              OriginKeepaliveTimeout: 60
+              # Default max OriginReadTimeout is 60s unless AWS raises the quota.
+              # Long Gemini jobs need page ranges (or later custom domain → ALB HTTPS).
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
           TargetOriginId: S3Ui
           ViewerProtocolPolicy: redirect-to-https
@@ -471,6 +432,10 @@ Outputs:
 
   SecretArn:
     Value: !Ref AppSecret
+
+  ExistingVpcIdOut:
+    Description: Company VPC used by this stack
+    Value: !Ref ExistingVpcId
 
   StackName:
     Value: !Ref AWS::StackName
