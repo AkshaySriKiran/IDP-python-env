@@ -27,18 +27,20 @@ Migrate OmniParse IDP to AWS for a **pilot**:
 - `aws login` had browser **400 Bad Request** issues  
 - **Need from IT:** CLI access keys **or** working SSO/`aws login`, plus deploy IAM for: CloudFormation, VPC, ALB, ECS/Fargate, ECR, S3, CloudFront, Secrets Manager, CloudWatch, IAM roles  
 
-### Cloud Agent status (2026-07-31)
+### Cloud Agent status (updated 2026-08-02)
 
 | Check | Status |
 |-------|--------|
-| AWS CLI v2 installed | Done (`aws-cli/2.36.x`) |
-| `AWS_REGION=eu-north-1` | Set as default in `infra/deploy.sh` / `.env.deploy.example` / README |
-| `aws sts get-caller-identity` | **FAIL — NoCredentials** (no access keys / SSO in this environment) |
-| Docker daemon | Done (docker.io 29.x; started manually when no systemd) |
-| Deploy (`./infra/deploy.sh`) | Done by team (Windows/Mac + AWS CLI) |
+| AWS CLI in this agent | No credentials (team deploys from Windows/Mac) |
+| Region | **`eu-west-1`** (default in `infra/deploy.sh`) |
+| VPC | Existing **My-VPC01** `vpc-01cdd75a59e8dafbb` (no new VPC) |
+| Stack | `omniparse-idp` → UPDATE_COMPLETE |
+| ECS | `omniparse-idp-api` → ACTIVE 1/1 |
 | Live CloudFront URL | https://d11bl7hg497hj.cloudfront.net/ |
 | API health | `GET /api/health` → `{"status":"ok",...}` (verified 2026-08-02) |
 | Bedrock | Not started (after Gemini pilot is stable) |
+
+Morning code update (`17d1d6f`): deploy into My-VPC01; ALB in public subnets; Fargate in private subnets; Docker `--platform linux/amd64`.
 
 **Unblock options:**
 

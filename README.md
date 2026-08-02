@@ -124,15 +124,16 @@ Static UI on **S3 + CloudFront**; FastAPI on **ECS Fargate** behind an **ALB**. 
 **Prerequisites:** AWS CLI v2, Docker, IAM rights for CloudFormation / ECS / ECR / S3 / CloudFront / Secrets Manager.
 
 ```bash
-export AWS_REGION=eu-north-1
+export AWS_REGION=eu-west-1
 export GEMINI_API_KEY="your_key_here"   # optional; UI can still paste a key
 chmod +x infra/deploy.sh
 ./infra/deploy.sh
 ```
 
-**Region:** pilot deploy uses **`eu-north-1`** (Stockholm).  
+**Region:** pilot deploy uses **`eu-west-1`** into company VPC **My-VPC01** (ALB public subnets, Fargate private subnets).  
 **LLM now:** Gemini API (key in Secrets Manager or UI). **Bedrock** is a later phase.  
-**Gate:** deploy refuses to run until `aws sts get-caller-identity` succeeds.
+**Gate:** deploy refuses to run until `aws sts get-caller-identity` succeeds.  
+**Live:** https://d11bl7hg497hj.cloudfront.net/
 
 ### Alternate: Mac Docker + CloudShell (no local AWS login)
 
