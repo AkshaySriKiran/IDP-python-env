@@ -63,32 +63,12 @@
         { "key": "hydraulic", "terms": ["hydraulic reservoir", "hydraulic system", "hydraulic pump", "hydraulic filter", "hydraulic"] }
       ]
     },
-    "Pump": {
-      "keywords": ["pump", "motor", "seal", "bearing", "impeller", "casing", "suction", "discharge", "pressure", "flow", "lubrication", "grease", "oil", "vibration", "alignment"],
-      "partClasses": [
-        { "key": "pump_body", "terms": ["pump casing", "volute", "pump housing", "pump body"] },
-        { "key": "impeller", "terms": ["impeller assembly", "impeller"] },
-        { "key": "seal", "terms": ["mechanical seal", "gland packing", "shaft seal", "o-ring", "seal"] },
-        { "key": "bearing", "terms": ["thrust bearing", "radial bearing", "ball bearing", "roller bearing", "bearing housing"] },
-        { "key": "shaft", "terms": ["pump shaft", "drive shaft", "shaft sleeve"] },
-        { "key": "coupling", "terms": ["flexible coupling", "spacer coupling", "motor coupling"] },
-        { "key": "motor", "terms": ["electric motor", "drive motor", "stator", "rotor"] },
-        { "key": "lubrication", "terms": ["oil level gauge", "grease nipple", "lubricating oil", "grease"] }
-      ]
-    },
-    "Drawworks": {
-      "keywords": ["drawworks", "drum", "brake", "clutch", "chain", "sprocket", "lubrication", "motor", "transmission", "winch", "wire rope"],
-      "partClasses": [
-        { "key": "drum", "terms": ["lebus drum", "main drum", "sand line drum", "drum shaft"] },
-        { "key": "brake_system", "terms": ["disc brake", "band brake", "brake caliper", "brake rim", "brake block"] },
-        { "key": "transmission", "terms": ["gearbox", "transmission shaft", "chain drive", "sprocket"] },
-        { "key": "clutch", "terms": ["air clutch", "friction clutch", "pneumatic clutch"] },
-        { "key": "motor", "terms": ["traction motor", "ac motor", "dc motor"] },
-        { "key": "lubrication", "terms": ["oil pump", "lube system", "grease manifold"] }
-      ]
-    },
     "Logbook": {
-      "keywords": ["logbook", "shift", "repair", "maintenance", "history", "record", "fault", "date", "replaced", "renewed", "attended by", "remarks", "work description"],
+      "keywords": [
+        "logbook", "shift", "repair", "maintenance", "history", "history card", "record",
+        "fault", "date", "replaced", "renewed", "attended by", "remarks", "work description",
+        "parts renewed", "field history", "top drive", "drawworks", "draw-works"
+      ],
       "partClasses": []
     }
   }

@@ -18,7 +18,10 @@ def build_extraction_prompt(
         prompt = f"""You are an expert transcriber of handwritten field history cards and maintenance logbooks.
 Your task is to analyze the image or text below and extract historical maintenance log entries exactly as they are written.
 
-Group your extractions into the "maintenance" list. Return an empty array [] for "spare_parts".
+These documents are often photographed HISTORY CARDs (Top Drive / Drawworks electrical, etc.).
+Pages may be sideways or rotated — still read every handwritten table row you can see.
+
+Group your extractions into the "maintenance" list. Return an empty array [] for "spare_parts" and "troubleshooting".
 If a field is missing, not specified, or not available in the text, you MUST populate it with the string "NA".
 
 You MUST strictly use the following 5 keys for every entry:
@@ -29,7 +32,7 @@ You MUST strictly use the following 5 keys for every entry:
 - "remarks"
 
 Response MUST be strictly valid JSON (and only JSON, with no other text before or after).
-CRITICAL: Even if the page looks like a cover page, or the table is messy and handwritten, DO NOT return empty arrays! You MUST attempt to extract whatever handwritten notes, signatures, or dates are visible into the "maintenance" list.
+CRITICAL: Even if the page looks like a cover page, or the table is messy and handwritten, DO NOT return empty arrays unless the page truly has no log rows (title/cover only)! Extract handwritten notes, signatures, or dates into the "maintenance" list when present.
 
 CRITICAL INSTRUCTION: DO NOT use the values from the example output. If a field is missing or not found in the text, you MUST output "NA".
 
@@ -44,7 +47,8 @@ Example Output Structure:
       "remarks": "Tested OK"
     }}
   ],
-  "spare_parts": []
+  "spare_parts": [],
+  "troubleshooting": []
 }}
 """
     else:

@@ -200,7 +200,11 @@ async function extractViaPythonApi(file, pageCountHint = null) {
   const form = new FormData();
   form.append("file", file, file.name);
   form.append("engine", engineMode === "ollama" ? "ollama" : "gemini");
-  form.append("parse_strategy", parseStrategy === "native" ? "native" : "ocr");
+  // History cards are image-only scans — always request OCR for Logbook.
+  const strategy = activeEquipmentCategory === "Logbook"
+    ? "ocr"
+    : (parseStrategy === "native" ? "native" : "ocr");
+  form.append("parse_strategy", strategy);
   form.append("gemini_api_key", geminiApiKey || "");
   form.append("gemini_model", geminiModel || "gemini-3.5-flash");
   form.append("ollama_url", ollamaUrl || "http://localhost:11434");
@@ -774,7 +778,7 @@ async function fetchManifest() {
     equipmentManifest = {
       categories: {
         "Default": { keywords: ["maintenance", "spare part"], partClasses: [] },
-        "Logbook": { keywords: ["logbook", "shift", "repair"], partClasses: [] }
+        "Logbook": { keywords: ["logbook", "shift", "repair", "history", "history card", "attended by"], partClasses: [] }
       }
     };
   }
@@ -821,7 +825,32 @@ if (equipmentCategorySelect) {
   equipmentCategorySelect.addEventListener("change", (e) => {
     activeEquipmentCategory = e.target.value;
     console.log("Switched equipment category to:", activeEquipmentCategory);
-    
+
+    // Field history cards are scanned photos — force OCR Vision.
+    if (activeEquipmentCategory === "Logbook") {
+      parseStrategy = "ocr";
+      if (parseStrategySelect) {
+        parseStrategySelect.value = "ocr";
+      }
+      if (engineMode === "heuristics") {
+        appendChatSystemMessage(
+          "ℹ️ Field History / Logbook works best with **Gemini** or **Ollama** + **OCR Vision** (these PDFs have no text layer)."
+        );
+      } else {
+        appendChatSystemMessage(
+          "ℹ️ Field History / Logbook: **OCR Vision** enabled. Use a small From/To page range on CloudFront (origin timeout ~60s)."
+        );
+      }
+      // Maintenance-interval filters don't apply to logbook rows.
+      if (filterTabs) filterTabs.style.display = "none";
+      if (activeRegistryTab !== "maintenance" && registryModeTabs) {
+        const maintBtn = registryModeTabs.querySelector('[data-mode="maintenance"]');
+        if (maintBtn) maintBtn.click();
+      }
+    } else if (filterTabs && activeRegistryTab === "maintenance") {
+      filterTabs.style.display = "flex";
+    }
+
     // Update table headers for logbook mode
     const maintenanceHeaders = document.getElementById("maintenance-table-headers");
     if (maintenanceHeaders) {
@@ -848,6 +877,7 @@ if (equipmentCategorySelect) {
         `;
       }
     }
+    renderGrid();
   });
 }
 if (engineModeSelect) {
@@ -1845,7 +1875,9 @@ Example Output Structure:
     systemPrompt = `You are an expert transcriber of handwritten field history cards and maintenance logbooks.
 Your task is to analyze the image or text below and extract historical maintenance log entries exactly as they are written.
 
-Group your extractions into the "maintenance" list. Return an empty array [] for "spare_parts".
+These documents are often photographed HISTORY CARDs (e.g. Top Drive / Drawworks electrical). Pages may be sideways or rotated — still read all handwritten rows.
+
+Group your extractions into the "maintenance" list. Return an empty array [] for "spare_parts" and "troubleshooting".
 If a field is missing, not specified, or not available in the text, you MUST populate it with the string "NA".
 
 You MUST strictly use the following 5 keys for every entry:
@@ -1856,7 +1888,7 @@ You MUST strictly use the following 5 keys for every entry:
 - "remarks"
 
 Response MUST be strictly valid JSON (and only JSON, with no other text before or after).
-CRITICAL: Even if the page looks like a cover page, or the table is messy and handwritten, DO NOT return empty arrays! You MUST attempt to extract whatever handwritten notes, signatures, or dates are visible into the "maintenance" list.
+CRITICAL: Even if the page looks like a cover page, or the table is messy and handwritten, DO NOT return empty arrays! You MUST attempt to extract whatever handwritten notes, signatures, or dates are visible into the "maintenance" list. Cover pages with only a title may return an empty maintenance list.
 
 CRITICAL INSTRUCTION: DO NOT use the values from the example output. If a field is missing or not found in the text, you MUST output "NA".
 
@@ -1871,7 +1903,8 @@ Example Output Structure:
       "remarks": "Tested OK"
     }
   ],
-  "spare_parts": []
+  "spare_parts": [],
+  "troubleshooting": []
 }`;
   }
   systemPrompt += `\n\n${learnedPatterns.length > 0 ? 
@@ -2393,7 +2426,9 @@ function renderGrid() {
       // 2. Search Text Query
       if (currentSearchQuery) {
         const q = currentSearchQuery.toLowerCase();
-        const matchText = `${row.equipment_title} ${row.subsystem_component} ${row.maintenance_routine} ${row.checks_instructions}`.toLowerCase();
+        const matchText = activeEquipmentCategory === "Logbook"
+          ? `${row.date} ${row.maintenance_work_description} ${row.parts_renewed} ${row.attended_by} ${row.remarks}`.toLowerCase()
+          : `${row.equipment_title} ${row.subsystem_component} ${row.maintenance_routine} ${row.checks_instructions}`.toLowerCase();
         if (!matchText.includes(q)) return false;
       }
 
@@ -3383,8 +3418,8 @@ function assembleRegistriesInPageOrder() {
       const pb = pageOrderKey(b);
       if (pa !== pb) return pa - pb;
       // Stable tie-break for rows from the same page.
-      return String(a.part_name || a.checks_instructions || a.problem || "")
-        .localeCompare(String(b.part_name || b.checks_instructions || b.problem || ""));
+      return String(a.part_name || a.maintenance_work_description || a.checks_instructions || a.problem || "")
+        .localeCompare(String(b.part_name || b.maintenance_work_description || b.checks_instructions || b.problem || ""));
     });
     sorted.forEach((row, idx) => { row.id = idx + 1; });
     return sorted;
@@ -3475,16 +3510,29 @@ function extractPDFText(file) {
           // Scanned manuals often have no text layer. Auto-OCR when native text is empty/weak
           // so Native mode does not silently skip real spare-parts pages.
           const nativeLen = (nativePageText || "").trim().length;
+          const forceLogbookOcr = useLLM && activeEquipmentCategory === "Logbook";
           const forceOcrForScan = useLLM && nativeLen < 40;
-          const useOcr = useLLM && (parseStrategy === "ocr" || forceOcrForScan);
-          if (forceOcrForScan && parseStrategy !== "ocr" && pageNum === rangeStart) {
+          const useOcr = useLLM && (parseStrategy === "ocr" || forceOcrForScan || forceLogbookOcr);
+          if (forceLogbookOcr && pageNum === rangeStart) {
+            appendChatSystemMessage(
+              "ℹ️ **Field History / Logbook**: forcing **OCR Vision** (history cards are image scans). Portrait pages are auto-rotated when needed."
+            );
+          } else if (forceOcrForScan && parseStrategy !== "ocr" && pageNum === rangeStart) {
             appendChatSystemMessage(`⚠️ **Scanned PDF detected**: little/no selectable text. Auto-enabling **OCR Vision** for this document so spare-parts tables can be read from page images.`);
           }
 
           // Always build native text first so TOC/index detection works even in OCR mode.
           // Render OCR images at 2x scale for dense NOV-style spare lists.
           if (useOcr) {
-            const viewport = page.getViewport({ scale: 2.0 });
+            const baseViewport = page.getViewport({ scale: 1.0 });
+            // Portrait image-only pages are often sideways photos of landscape history cards.
+            const rotate =
+              (forceLogbookOcr || forceOcrForScan) &&
+              nativeLen < 40 &&
+              baseViewport.height > baseViewport.width
+                ? 90
+                : 0;
+            const viewport = page.getViewport({ scale: 2.0, rotation: rotate });
             const canvas = document.createElement("canvas");
             const ctx = canvas.getContext("2d");
             canvas.height = viewport.height;

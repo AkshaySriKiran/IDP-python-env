@@ -154,11 +154,12 @@
             <div class="form-group">
               <label for="equipment-category">Equipment Category (Manifest)</label>
               <select id="equipment-category" class="settings-select">
-                <option value="Default" selected>Default (General)</option>
-                <option value="Pump">Pumps</option>
-                <option value="Drawworks">Drawworks</option>
+                <option value="Default" selected>Default (O&amp;M)</option>
                 <option value="Logbook">Field History / Logbook</option>
               </select>
+              <p id="equipment-category-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">
+                O&amp;M manuals use Default. History cards / logbooks need Field History + OCR Vision.
+              </p>
             </div>
             
             <div id="ollama-settings-group" style="display: none;">

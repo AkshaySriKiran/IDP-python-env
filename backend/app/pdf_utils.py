@@ -38,6 +38,7 @@ def extract_pdf_pages(
     parse_strategy: str = "ocr",
     page_start: Optional[int] = None,
     page_end: Optional[int] = None,
+    ocr_auto_rotate: bool = False,
 ) -> list[PagePayload]:
     """Extract text (and optional page images) from a PDF."""
     import fitz  # pymupdf
@@ -72,12 +73,20 @@ def extract_pdf_pages(
 
         use_ocr = parse_strategy == "ocr" or len(native_text) < 40
         # Only render page images when text is weak (avoids rendering thousands of JPEGs).
-        if parse_strategy == "ocr" and len(native_text) >= 80:
+        if parse_strategy == "ocr" and len(native_text) >= 80 and not ocr_auto_rotate:
             use_ocr = False
+        # Field-history / logbook cards are almost always image scans.
+        if ocr_auto_rotate:
+            use_ocr = True
         image_b64 = None
         if use_ocr:
             page = doc.load_page(page_num - 1)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            # Portrait image-only pages are often sideways photos of landscape cards.
+            rotate = 0
+            if ocr_auto_rotate and len(native_text) < 40 and page.rect.height > page.rect.width:
+                rotate = 90
+            mat = fitz.Matrix(2, 2).prerotate(rotate) if rotate else fitz.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
             image_b64 = base64.b64encode(pix.tobytes("jpeg")).decode("ascii")
 
         pages.append(

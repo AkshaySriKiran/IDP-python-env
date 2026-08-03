@@ -80,12 +80,16 @@ async def extract_document(
     all_trouble: list[dict[str, Any]] = []
 
     if ext == "pdf":
+        # History cards are scanned photos; always OCR + auto-rotate sideways pages.
+        is_logbook = (options.equipment_category or "").strip() == "Logbook"
+        effective_strategy = "ocr" if is_logbook else options.parse_strategy
         page_payloads = await asyncio.to_thread(
             extract_pdf_pages,
             file_bytes,
-            parse_strategy=options.parse_strategy,
+            parse_strategy=effective_strategy,
             page_start=options.page_start,
             page_end=options.page_end,
+            ocr_auto_rotate=is_logbook,
         )
         from ..pdf_utils import MAX_PDF_PAGES
 
