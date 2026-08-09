@@ -17,6 +17,41 @@ class PagePayload:
     mime_type: str = "image/jpeg"
 
 
+def _page_needs_vision(native_text: str, page) -> bool:
+    """Decide when sparse/garbled native text should still send a page image to the LLM."""
+    t = (native_text or "").strip()
+    if len(t) < 40:
+        return True
+    low = t.lower()
+    if "intentionally left blank" in low:
+        return True
+    # Title-only section covers that front dense image tables (RSPL, BOM sheets).
+    if len(t) < 180 and any(
+        k in low
+        for k in (
+            "recommended spare parts",
+            "rspl",
+            "bill of material",
+            "bill of materials",
+            "spare parts list",
+        )
+    ):
+        return True
+    # CID / encoding-garbled extracts (common in older OEM PDFs).
+    if len(t) >= 200:
+        weird = sum(1 for ch in t if ord(ch) > 127 and not (ch.isalpha() or ch.isspace()))
+        if weird / max(len(t), 1) > 0.2:
+            return True
+    # Sparse native text but the page clearly has drawings/images.
+    if len(t) < 120:
+        try:
+            if page.get_images(full=True):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
 def resolve_page_range(total_pages: int, page_start: Optional[int], page_end: Optional[int]) -> tuple[int, int]:
     start = page_start if page_start and page_start > 0 else 1
     end = page_end if page_end and page_end > 0 else total_pages
@@ -71,7 +106,8 @@ def extract_pdf_pages(
         except Exception:  # noqa: BLE001
             pass
 
-        use_ocr = parse_strategy == "ocr" or len(native_text) < 40
+        page = doc.load_page(page_num - 1)
+        use_ocr = parse_strategy == "ocr" or _page_needs_vision(native_text, page)
         # Only render page images when text is weak (avoids rendering thousands of JPEGs).
         if parse_strategy == "ocr" and len(native_text) >= 80 and not ocr_auto_rotate:
             use_ocr = False
@@ -80,7 +116,6 @@ def extract_pdf_pages(
             use_ocr = True
         image_b64 = None
         if use_ocr:
-            page = doc.load_page(page_num - 1)
             # Portrait image-only pages are often sideways photos of landscape cards.
             rotate = 0
             if ocr_auto_rotate and len(native_text) < 40 and page.rect.height > page.rect.width:
@@ -89,10 +124,20 @@ def extract_pdf_pages(
             pix = page.get_pixmap(matrix=mat, alpha=False)
             image_b64 = base64.b64encode(pix.tobytes("jpeg")).decode("ascii")
 
+        page_text = native_text
+        if image_b64 and (not page_text or _page_needs_vision(native_text, page)):
+            # Mark vision pages so prompts apply dense-table OCR rules even when a short header remains.
+            if "OCR VISION EXTRACTION" not in page_text.upper():
+                page_text = (
+                    f"{page_text}\n\nOCR VISION EXTRACTION".strip()
+                    if page_text
+                    else "OCR VISION EXTRACTION"
+                )
+
         pages.append(
             PagePayload(
                 page_num=page_num,
-                text=native_text if native_text else ("OCR VISION EXTRACTION" if image_b64 else ""),
+                text=page_text,
                 image_b64=image_b64,
                 mime_type="image/jpeg",
             )

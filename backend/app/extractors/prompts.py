@@ -61,15 +61,20 @@ Your task is to analyze the text page content below and extract:
 Group your extractions into three distinct JSON lists: "maintenance", "spare_parts", and "troubleshooting".
 CRITICAL INSTRUCTION: If a field is missing, not specified, or not available in the text, you MUST populate it with the string "NA". Do not use null, undefined, or empty values.
 """
+        prompt += """
+DENSE TABLE / CATALOG RULES (CRITICAL — apply on every page):
+- Read EVERY filled row in spare-parts tables. Do not sample, summarize, or stop after a few examples.
+- Include dense electrical/mechanical rows (fuses, breakers, relays, fans, kits, contactors, etc.).
+- Map: Description → part_name; NOV Part No / Part No / Code → part_number_code; Item/Ref No → drawing_model_no; Item No → item_no.
+- Cubicle/section headers (e.g. INCOMER CUBICLE, DRIVE CUBICLE) go into subsystem_location for following rows.
+- Commissioning / recommended quantities can go into quantity / recommended_stock_qty when present.
+- Prefer completeness over brevity. Output as many spare_parts objects as there are real table rows on this page.
+"""
         if is_ocr_vision:
             prompt += """
 OCR / SCANNED PAGE RULES (CRITICAL):
-- Read EVERY filled row in spare-parts tables. Do not stop after a few sample rows.
-- Include dense electrical/mechanical rows (fuses, breakers, relays, fans, kits, etc.).
-- Map: Description → part_name, NOV/Part No → part_number_code, Item/Ref No → drawing_model_no, Item No → item_no.
-- Cubicle/section headers (e.g. INCOMER CUBICLE) go into subsystem_location for following rows.
-- Commissioning / Two-year recommended quantities can go into quantity / recommended_stock_qty when present.
-- Prefer completeness over brevity. Output as many spare_parts objects as there are real table rows on this page.
+- The page image is authoritative when native text is sparse, blank, or garbled.
+- Read every visible row from RSPL / BOM / parts-list drawings in the image.
 """
         prompt += f"""
 Rules for "maintenance" tasks:
@@ -82,14 +87,17 @@ Rules for "maintenance" tasks:
 
 Rules for "spare_parts":
 - Extract items that represent real spare parts, consumables, hardware, or components.
+- CRITICAL for catalog / bill-of-materials tables (especially pages with an assembly diagram + No./Code/Name/Qty table): extract EVERY numbered row on the page. Do not sample, summarize, or stop after a few examples.
+- Emit spare_parts objects in the same top-to-bottom order as the PDF table (Item 1, then 2, then 3, …). Never alphabetize by part name.
+- If the table continues from a previous page (item numbers resume at 15, 16, …), still extract every remaining row.
 - DO NOT extract ordering metadata, procurement fields, or identification labels as parts.
 - Reject list labels or ordering metadata unless there is clear evidence of an actual physical part (for example a concrete component name with valid part/drawing reference context).
-- For "equipment_title", you MUST extract the explicit Table Title, Header, or Caption directly preceding the parts list. Do not use random surrounding text. Default to "{clean_doc_name}" if there is absolutely no title.
-- For "subsystem_location", identify the specific assembly or sub-system the part belongs to. If the table title explicitly mentions the assembly name, use it here.
+- For "equipment_title", use the document equipment name (default "{clean_doc_name}"), not a section number like "5.2.1 …".
+- For "subsystem_location", identify the specific assembly or sub-system the part belongs to. If the table title explicitly mentions the assembly name (e.g. "Adjusting screw assembly", "Spray Module"), use it here.
 - For "part_name", extract the descriptive name of the component or part.
 - For "part_categorization", use "Critical Spare", "Consumable", or "Standard Part".
 - For "quantity", extract the number of units.
-- For "part_number_code": The manufacturer's part number or code. This is often an alphanumeric string (e.g. "H910-416", "30123290", "51300-348-F"), not necessarily a long numeric code. Scan the entire row/segment for it, including columns labeled "P/N", "Part No.", "Code", "Number", or similar.
+- For "part_number_code": The manufacturer's part number or code. This is often an alphanumeric string (e.g. "H910-416", "30123290", "BC100113-0704"), not necessarily a long numeric code. Scan the entire row/segment for it, including columns labeled "P/N", "Part No.", "Code", "Figure No.", "Number", or similar.
 - For "drawing_model_no": The engineering drawing, reference/location designator (e.g. "U1", "TB2"), or model designator number, if present in the row.
 - For "oem_standard_body": The OEM name, manufacturer, or governing standard/body (e.g. "ANSI", "ISO", "DIN") referenced for the part, if present.
 - For "recommended_stock_qty", extract stock recommendation levels if present.
@@ -98,8 +106,10 @@ Rules for "spare_parts":
 - IMPORTANT: Every field above must be actively searched for within the row's full text before defaulting to "NA". Only use "NA" when the information is truly absent from that row, not simply because it doesn't fit the example format below.
 
 Rules for "troubleshooting" tasks:
-- ONLY extract explicit troubleshooting matrices or tables. DO NOT extract Table of Contents headers, general descriptions, or normal paragraphs as problems.
-- A valid problem MUST have a corresponding root cause and solution. If the text does not describe a fault and how to fix it, do NOT extract it.
+- Extract troubleshooting matrices/tables AND fault-diagnosis sections that pair a symptom/problem with cause and remedy.
+- DO NOT extract Table of Contents headers, HMI button/label descriptions, or normal operating paragraphs as problems.
+- A valid problem MUST include how to diagnose or fix it (root cause, remedy, elimination method, or numbered inspection steps). If only a symptom is mentioned with no fix path, skip it.
+- Alarm UI legends like "gray = normal, red = fault" are NOT troubleshooting rows unless a specific fault and corrective action are stated.
 - For "equipment_title", default to "{clean_doc_name}" if not specified.
 - For "subsystem_component", identify the specific sub-system.
 - For "problem", extract the symptom, fault, or issue described.

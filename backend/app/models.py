@@ -9,6 +9,15 @@ EngineMode = Literal["gemini", "ollama"]
 ParseStrategy = Literal["native", "ocr"]
 
 
+class RowQuality(BaseModel):
+    grounding_score: float = Field(
+        default=1.0, description="Token/phrase source grounding match ratio (0.0 - 1.0)"
+    )
+    completeness_score: float = Field(
+        default=1.0, description="Ratio of non-empty essential fields (0.0 - 1.0)"
+    )
+
+
 class MaintenanceRow(BaseModel):
     id: int = 0
     equipment_title: str = "NA"
@@ -22,6 +31,10 @@ class MaintenanceRow(BaseModel):
     attended_by: str = "NA"
     remarks: str = "NA"
     page: Any = "NA"
+    # Top-to-bottom order on the source PDF page (1-based).
+    pdf_order: int = 0
+    confidence: float = Field(default=1.0, description="Row confidence score (0.0 - 1.0)")
+    quality: Optional[RowQuality] = None
 
 
 class SparePartRow(BaseModel):
@@ -39,6 +52,10 @@ class SparePartRow(BaseModel):
     warranty_period: str = "NA"
     frequency_of_use: str = "NA"
     page: Any = "NA"
+    # Top-to-bottom order on the source PDF page (1-based). Used to avoid name-sorting jumble.
+    pdf_order: int = 0
+    confidence: float = Field(default=1.0, description="Row confidence score (0.0 - 1.0)")
+    quality: Optional[RowQuality] = None
 
 
 class TroubleshootingRow(BaseModel):
@@ -48,6 +65,10 @@ class TroubleshootingRow(BaseModel):
     problem: str = "NA"
     root_cause_solution: str = "NA"
     page: Any = "NA"
+    # Top-to-bottom order on the source PDF page (1-based).
+    pdf_order: int = 0
+    confidence: float = Field(default=1.0, description="Row confidence score (0.0 - 1.0)")
+    quality: Optional[RowQuality] = None
 
 
 class PageText(BaseModel):
@@ -65,6 +86,18 @@ class ExtractMeta(BaseModel):
     spare_parts_count: int = 0
     troubleshooting_count: int = 0
     warnings: list[str] = Field(default_factory=list)
+    overall_score: float = Field(
+        default=100.0, description="Overall run quality score percentage (0 - 100)"
+    )
+    grounding_pass_rate: float = Field(
+        default=1.0, description="Share of grounded rows with grounding_score >= 0.70"
+    )
+    filter_drop_rate: float = Field(
+        default=0.0, description="Ratio of incomplete/noisy rows filtered out"
+    )
+    low_confidence_count: int = Field(
+        default=0, description="Total rows with confidence below 0.70"
+    )
 
 
 class ExtractResponse(BaseModel):
@@ -78,8 +111,24 @@ class ExtractResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "omniparse-maintenance-api"
-    version: str = "0.1.0"
+    version: str = "0.3.0"
     busy: bool = False
+
+
+class ExtractJobCreateResponse(BaseModel):
+    job_id: str
+    status: str = "queued"
+    message: str = "Extraction job queued"
+
+
+class ExtractJobStatusResponse(BaseModel):
+    job_id: str
+    status: str  # queued | running | done | error
+    message: str = ""
+    progress: float = 0.0
+    filename: str = ""
+    error: Optional[str] = None
+    result: Optional[ExtractResponse] = None
 
 
 class ExtractOptions(BaseModel):
@@ -93,3 +142,43 @@ class ExtractOptions(BaseModel):
     page_end: Optional[int] = None
     equipment_category: str = "Default"
     learned_patterns: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ExtractAuditRecord(BaseModel):
+    """Admin-visible summary of one AI extraction run (no secrets, no full registries)."""
+
+    id: str
+    created_at: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration_ms: int = 0
+    job_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    filename: str = ""
+    engine: str = ""
+    parse_strategy: str = ""
+    gemini_model: Optional[str] = None
+    ollama_model: Optional[str] = None
+    equipment_category: str = "Default"
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    pages_total: int = 0
+    pages_processed: int = 0
+    maintenance_count: int = 0
+    spare_parts_count: int = 0
+    troubleshooting_count: int = 0
+    overall_score: Optional[float] = None
+    grounding_pass_rate: Optional[float] = None
+    filter_drop_rate: Optional[float] = None
+    low_confidence_count: Optional[int] = None
+    warnings: list[str] = Field(default_factory=list)
+    s3_key: Optional[str] = None
+
+
+class ExtractAuditListResponse(BaseModel):
+    items: list[ExtractAuditRecord] = Field(default_factory=list)
+    count: int = 0
+

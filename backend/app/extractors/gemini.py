@@ -53,7 +53,8 @@ async def run_gemini_extractor(
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json",
-            "maxOutputTokens": 16384 if base64_image else 8192,
+            # Dense spare catalogs often need the higher ceiling even on native text pages.
+            "maxOutputTokens": 16384,
         },
     }
 

@@ -117,6 +117,31 @@ curl -I http://localhost:8000/
 
 ---
 
+---
+
+## Auth & Global Admin (pilot)
+
+Per-user access, Copilot daily limits, and assigned LLM models are managed by a **Global Admin**.
+
+| Item | Default |
+|------|---------|
+| Admin email | `admin@omniparse.local` |
+| Admin password | `ChangeMeNow!` |
+| User store | `backend/data/users.json` (gitignored) |
+| Require login | `AUTH_REQUIRED=false` (set `true` to force sign-in) |
+
+```bash
+export AUTH_REQUIRED=true
+export GLOBAL_ADMIN_EMAIL=you@company.com
+export GLOBAL_ADMIN_PASSWORD='your-strong-password'
+export GEMINI_API_KEY=...   # used by server Copilot + extract
+./start-api.sh
+```
+
+In the UI: **Sign in** → **Admin** (admin only) → create users, raise Copilot limits, assign models.
+
+See `backend/.env.auth.example` for all options.
+
 ## Deploy to AWS (ECS Fargate — recommended)
 
 Static UI on **S3 + CloudFront**; FastAPI on **ECS Fargate** behind an **ALB**. CloudFront proxies `/api/*` to the ALB (same-origin HTTPS).
@@ -149,6 +174,7 @@ The script creates/updates the CloudFormation stack, builds and pushes the API i
 | `backend/` FastAPI | ECR → ECS Fargate → ALB |
 | `GEMINI_API_KEY` | Secrets Manager |
 | Logs | CloudWatch `/ecs/omniparse-idp-api` |
+| Extract audit (admin) | S3 `${ProjectName}-extract-audit-*` + Admin → Extraction logs |
 
 **Note:** CloudFront’s custom-origin read timeout max is **180 seconds**. Use page ranges for long OCR jobs, or later put an HTTPS ALB on a custom domain for longer requests.
 
@@ -174,7 +200,6 @@ Tear down: `aws cloudformation delete-stack --stack-name omniparse-idp`
 │   ├── cloudshell-phase3.sh
 │   ├── mac-push-ecr.sh
 │   └── .env.deploy.example
-├── scripts/                # Scratch / one-off test scripts
 └── backend/
     ├── Dockerfile
     ├── app/

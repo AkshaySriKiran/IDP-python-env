@@ -178,6 +178,18 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref AppSecret
+        - PolicyName: ExtractAuditS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt AuditBucket.Arn
+                  - !Sub "${AuditBucket.Arn}/*"
 
   # ----- ALB -----
   ApplicationLoadBalancer:
@@ -260,15 +272,26 @@ Resources:
               Value: "0.0.0.0"
             - Name: API_PORT
               Value: "8001"
-            # CloudFront URL is injected by deploy.sh after stack outputs exist;
-            # localhost kept for local UI testing against a remote API if needed.
+            # Require sign-in for extract + Copilot on the live API.
+            - Name: AUTH_REQUIRED
+              Value: "true"
+            # Models Global Admin can assign to users.
+            - Name: MODEL_CATALOG
+              Value: "gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.5-flash,gemini-3.1-pro-preview,gemini-2.5-flash,gemini-2.5-pro"
+            # CloudFront is same-origin for /api; localhost kept for local UI testing.
             - Name: CORS_ORIGINS
-              Value: "http://localhost:8000,http://127.0.0.1:8000"
+              Value: !Sub "http://localhost:8000,http://127.0.0.1:8000,https://${CloudFrontDistribution.DomainName}"
             - Name: GEMINI_MODEL
               Value: !Ref GeminiModel
+            # Durable admin extract outcome logs (survives task redeploy).
+            - Name: EXTRACT_AUDIT_S3_BUCKET
+              Value: !Ref AuditBucket
           Secrets:
             - Name: GEMINI_API_KEY
               ValueFrom: !Sub "${AppSecret}:GEMINI_API_KEY::"
+            # Stable signing key so redeploys do not invalidate active sessions.
+            - Name: JWT_SECRET
+              ValueFrom: !Sub "${AppSecret}:JWT_SECRET::"
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -312,6 +335,26 @@ Resources:
         MinimumHealthyPercent: 50
 
   # ----- UI: S3 + CloudFront -----
+  # Private bucket for admin extraction outcome summaries (JSON).
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-extract-audit-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldAuditLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
   UiBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -429,6 +472,10 @@ Outputs:
 
   UiBucketName:
     Value: !Ref UiBucket
+
+  ExtractAuditBucketName:
+    Description: S3 bucket for admin AI extraction outcome logs
+    Value: !Ref AuditBucket
 
   SecretArn:
     Value: !Ref AppSecret

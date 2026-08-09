@@ -6,6 +6,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .catalog_tables import extract_catalog_spare_rows, merge_spare_rows
+
 
 def sanitize_val(val: Any) -> str:
     if val is None:
@@ -114,7 +116,41 @@ def extract_content_tokens(text: str) -> list[str]:
     return out
 
 
+def grounding_ratio(candidate_text: str, source_text: str) -> float:
+    """Continuous 0–1 grounding score from token overlap + phrase match."""
+    source = str(source_text or "").lower()
+    if not source.strip():
+        return 0.0
+    tokens = extract_content_tokens(candidate_text)
+    if not tokens:
+        return 0.0
+
+    matched = [t for t in tokens if t in source]
+    token_ratio = len(matched) / max(1, len(tokens))
+
+    words = [w for w in re.sub(r"[^a-z0-9\s]", " ", str(candidate_text or "").lower()).split() if len(w) >= 3]
+    phrase_ok = False
+    if len(words) >= 3:
+        for i in range(0, len(words) - 2):
+            trigram = f"{words[i]} {words[i + 1]} {words[i + 2]}".strip()
+            if len(trigram) >= 10 and trigram in source:
+                phrase_ok = True
+                break
+    if not phrase_ok and len(words) >= 2:
+        for i in range(0, len(words) - 1):
+            bigram = f"{words[i]} {words[i + 1]}".strip()
+            if len(bigram) >= 12 and bigram in source:
+                phrase_ok = True
+                break
+
+    # Phrase match is required for hard pass; fold it into a continuous score.
+    phrase_component = 1.0 if phrase_ok else 0.0
+    score = (token_ratio * 0.65) + (phrase_component * 0.35)
+    return round(max(0.0, min(1.0, score)), 3)
+
+
 def is_text_grounded_in_source(candidate_text: str, source_text: str) -> bool:
+    """Boolean filter using the same thresholds as before (token + phrase)."""
     source = str(source_text or "").lower()
     if not source.strip():
         return False
@@ -142,6 +178,43 @@ def is_text_grounded_in_source(candidate_text: str, source_text: str) -> bool:
                 phrase_ok = True
                 break
     return token_ok and phrase_ok
+
+
+def _maintenance_grounding_text(row: dict[str, Any], *, equipment_category: str) -> str:
+    if equipment_category == "Logbook":
+        return str(row.get("maintenance_work_description") or "")
+    return str(row.get("checks_instructions") or "")
+
+
+def _spare_grounding_text(row: dict[str, Any]) -> str:
+    return f"{row.get('part_name')} {row.get('part_number_code')} {row.get('drawing_model_no')}"
+
+
+def _trouble_grounding_text(row: dict[str, Any]) -> str:
+    return f"{row.get('problem')} {row.get('root_cause_solution')}"
+
+
+def _attach_grounding_unavailable(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        row["grounding_score"] = 0.5
+        row["grounding_available"] = False
+
+
+def _filter_grounded_with_scores(
+    rows: list[dict[str, Any]],
+    *,
+    source: str,
+    text_fn,
+) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = text_fn(row)
+        ratio = grounding_ratio(candidate, source)
+        if is_text_grounded_in_source(candidate, source):
+            row["grounding_score"] = ratio
+            row["grounding_available"] = True
+            kept.append(row)
+    return kept
 
 
 def is_clean_maintenance_row(row: dict[str, Any], *, equipment_category: str) -> bool:
@@ -310,6 +383,7 @@ def process_raw_model_response(
                         "maintenance_routine": "NA",
                         "checks_instructions": "NA",
                         "page": page_num,
+                        "pdf_order": len(output["maintenance"]) + 1,
                     }
                 )
             else:
@@ -329,6 +403,7 @@ def process_raw_model_response(
                         "attended_by": "NA",
                         "remarks": "NA",
                         "page": page_num,
+                        "pdf_order": len(output["maintenance"]) + 1,
                     }
                 )
 
@@ -358,6 +433,7 @@ def process_raw_model_response(
                     "warranty_period": sanitize_val(item.get("warranty_period")),
                     "frequency_of_use": freq,
                     "page": page_num,
+                    "pdf_order": len(output["spare_parts"]) + 1,
                 }
             )
 
@@ -376,8 +452,13 @@ def process_raw_model_response(
                     "problem": sanitize_val(item.get("problem")),
                     "root_cause_solution": sanitize_val(item.get("root_cause_solution")),
                     "page": page_num,
+                    "pdf_order": len(output["troubleshooting"]) + 1,
                 }
             )
+
+    candidates_before = (
+        len(output["maintenance"]) + len(output["spare_parts"]) + len(output["troubleshooting"])
+    )
 
     output["maintenance"] = [
         r for r in output["maintenance"] if is_clean_maintenance_row(r, equipment_category=equipment_category)
@@ -394,31 +475,67 @@ def process_raw_model_response(
         and ". . ." not in str(r.get("problem") or "").lower()
     ]
 
+    grounding_available = False
     if not has_image:
         source = str(source_text or "")
         if source.strip():
-            if equipment_category == "Logbook":
-                output["maintenance"] = [
-                    r
-                    for r in output["maintenance"]
-                    if is_text_grounded_in_source(r.get("maintenance_work_description") or "", source)
-                ]
-            else:
-                output["maintenance"] = [
-                    r for r in output["maintenance"] if is_text_grounded_in_source(r.get("checks_instructions") or "", source)
-                ]
-            output["spare_parts"] = [
-                r
-                for r in output["spare_parts"]
-                if is_text_grounded_in_source(
-                    f"{r.get('part_name')} {r.get('part_number_code')} {r.get('drawing_model_no')}",
-                    source,
-                )
-            ]
-            output["troubleshooting"] = [
-                r
-                for r in output["troubleshooting"]
-                if is_text_grounded_in_source(f"{r.get('problem')} {r.get('root_cause_solution')}", source)
-            ]
+            grounding_available = True
+            output["maintenance"] = _filter_grounded_with_scores(
+                output["maintenance"],
+                source=source,
+                text_fn=lambda r: _maintenance_grounding_text(r, equipment_category=equipment_category),
+            )
+            output["spare_parts"] = _filter_grounded_with_scores(
+                output["spare_parts"],
+                source=source,
+                text_fn=_spare_grounding_text,
+            )
+            output["troubleshooting"] = _filter_grounded_with_scores(
+                output["troubleshooting"],
+                source=source,
+                text_fn=_trouble_grounding_text,
+            )
+        else:
+            _attach_grounding_unavailable(output["maintenance"])
+            _attach_grounding_unavailable(output["spare_parts"])
+            _attach_grounding_unavailable(output["troubleshooting"])
+    else:
+        _attach_grounding_unavailable(output["maintenance"])
+        _attach_grounding_unavailable(output["spare_parts"])
+        _attach_grounding_unavailable(output["troubleshooting"])
 
-    return normalize_extraction(output)
+    # Dense OEM catalog tables beside diagrams are often under-sampled by the LLM.
+    # Deterministically recover every No./Code/Name/Qty row from page text.
+    if equipment_category != "Logbook" and str(source_text or "").strip():
+        catalog_rows = extract_catalog_spare_rows(
+            source_text,
+            page_num=page_num,
+            doc_name=clean_doc_name,
+        )
+        if catalog_rows:
+            before_spares = len(output["spare_parts"])
+            output["spare_parts"] = merge_spare_rows(output["spare_parts"], catalog_rows)
+            # Count newly recovered catalog rows toward quality stats.
+            candidates_before += max(0, len(output["spare_parts"]) - before_spares)
+
+    candidates_after = (
+        len(output["maintenance"]) + len(output["spare_parts"]) + len(output["troubleshooting"])
+    )
+    # Stamp stable within-page order for any rows still missing pdf_order.
+    for i, row in enumerate(output["maintenance"], start=1):
+        if not row.get("pdf_order"):
+            row["pdf_order"] = i
+    for i, row in enumerate(output["spare_parts"], start=1):
+        if not row.get("pdf_order"):
+            row["pdf_order"] = i
+    for i, row in enumerate(output["troubleshooting"], start=1):
+        if not row.get("pdf_order"):
+            row["pdf_order"] = i
+
+    output["_quality_stats"] = {
+        "candidates_before": candidates_before,
+        "candidates_after": candidates_after,
+        "grounding_available": grounding_available,
+    }
+
+    return output

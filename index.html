@@ -4,35 +4,34 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IDP – Cognitive Contextual Search & Excel Generator</title>
-  <meta name="description" content="IDP – Cognitive Contextual Search, Maintenance Extractor, and structured Registry generator. Parse PDF, Word (DOCX), TXT, and scanned user manuals offline using client-side AI heuristics or local Ollama engines.">
-  
+  <meta name="description" content="IDP – Cognitive Contextual Search, Maintenance Extractor, and structured Registry generator.">
+
   <!-- Modern Google Font -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  
-  <!-- CSS Stylesheet link -->
-  <link rel="stylesheet" href="styles.css?v=15">
+
+  <link rel="stylesheet" href="styles.css?v=80">
 
   <!-- Apply saved theme before paint to avoid dark/light flash -->
   <script>
     (function () {
       try {
-        var saved = localStorage.getItem("idp_theme");
-        var theme = (saved === "light" || saved === "dark") ? saved : "dark";
+        var saved = localStorage.getItem("idp_theme_v2");
+        var theme = (saved === "light" || saved === "dark") ? saved : "light";
         document.documentElement.setAttribute("data-theme", theme);
       } catch (e) {
-        document.documentElement.setAttribute("data-theme", "dark");
+        document.documentElement.setAttribute("data-theme", "light");
       }
     })();
   </script>
 
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
-  
+
   <!-- PDF.js library for client-side PDF rendering/extraction -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-  
+
   <!-- SheetJS library for high-fidelity client-side Excel generation -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
@@ -50,214 +49,179 @@
     <header class="app-header">
       <div class="header-logo">
         <div class="logo-icon">
-          <i data-lucide="cpu"></i>
+          <img src="assets/idp-logo.png" alt="IDP logo" class="logo-image" width="42" height="50">
         </div>
         <div class="logo-text">
           <h1>IDP</h1>
-          <p>Cognitive Contextual Search</p>
+          <p>For O&amp;M Manuals and History Cards</p>
         </div>
       </div>
+
       <div class="header-status">
-        <div class="status-indicator">
-          <span class="pulse"></span>
-          <span class="status-label">Checking API...</span>
+        <!-- Upload group: doc badge (only when a document is loaded) + Upload button.
+             Element IDs match what app.js expects. -->
+        <div class="header-upload" id="drop-zone" title="Drag &amp; drop a document here">
+          <input type="file" id="file-input" class="file-input-hidden" accept=".pdf,.txt,.doc,.docx,.jpg,.jpeg,.png" tabindex="-1" aria-hidden="true">
+
+          <div class="active-doc-badge" id="active-doc-name" style="border-color: hsla(0, 85%, 60%, 0.3); color: hsl(0, 85%, 65%); background: hsla(0, 85%, 60%, 0.05);">
+            <i data-lucide="file-warning"></i>
+            <span>No Document Loaded</span>
+          </div>
+
+          <button type="button" class="btn btn-primary header-upload-btn" id="upload-menu-btn" aria-expanded="false">
+            <i data-lucide="upload-cloud"></i>
+            <span>Upload</span>
+            <i data-lucide="chevron-down" class="header-upload-caret"></i>
+          </button>
+
+          <!-- Upload popup: optional page range + file chooser (opens on Upload click) -->
+          <div class="upload-popover" id="page-range-row" onclick="event.stopPropagation()" hidden>
+            <h4>Upload document</h4>
+            <div class="upload-popover-range">
+              <div class="page-range-field">
+                <label for="page-range-start">From page</label>
+                <input type="number" id="page-range-start" min="1" placeholder="1" class="settings-input">
+              </div>
+              <span class="page-range-sep">&ndash;</span>
+              <div class="page-range-field">
+                <label for="page-range-end">To page</label>
+                <input type="number" id="page-range-end" min="1" placeholder="Last" class="settings-input">
+              </div>
+            </div>
+            <p class="upload-popover-hint">Optional — leave blank to process the whole manual. You can also drag &amp; drop a file onto the Upload button.</p>
+            <label for="file-input" class="btn btn-primary upload-popover-choose" id="browse-btn">
+              <i data-lucide="folder-open"></i>
+              <span>Choose file…</span>
+            </label>
+          </div>
+
         </div>
+
+        <!-- Collapsed tools: expand on click -->
+        <button type="button" class="theme-toggle-btn rail-btn" id="rail-settings-btn" title="AI Parsing Engine Settings" aria-expanded="false">
+          <i data-lucide="sliders"></i>
+        </button>
+        <button type="button" class="theme-toggle-btn rail-btn" id="rail-chat-btn" title="AI Assistant" aria-expanded="false">
+          <i data-lucide="sparkles"></i>
+          <span class="rail-dot" id="rail-chat-dot" hidden></span>
+        </button>
+
         <button type="button" class="theme-toggle-btn" id="theme-toggle-btn" title="Switch to light mode" aria-label="Toggle light and dark mode">
           <i data-lucide="sun" class="theme-icon-sun"></i>
           <i data-lucide="moon" class="theme-icon-moon"></i>
-          <span class="theme-toggle-label" id="theme-toggle-label">Light</span>
         </button>
-        <div class="active-doc-badge" id="active-doc-name" style="border-color: hsla(0, 85%, 60%, 0.3); color: hsl(0, 85%, 65%); background: hsla(0, 85%, 60%, 0.05);">
-          <i data-lucide="file-warning"></i>
-          <span>No Document Loaded</span>
+
+        <!-- Standard account control (same layout for user + admin) -->
+        <button type="button" class="btn btn-secondary auth-header-btn" id="auth-login-btn">Sign in</button>
+        <div class="profile-menu" id="profile-menu" hidden>
+          <button type="button" class="profile-trigger" id="profile-trigger" aria-haspopup="true" aria-expanded="false" title="Account">
+            <span class="profile-avatar" id="profile-avatar">U</span>
+            <span class="profile-name" id="profile-name">Account</span>
+            <i data-lucide="chevron-down" class="profile-caret"></i>
+          </button>
+          <div class="profile-dropdown" id="profile-dropdown" hidden>
+            <div class="profile-dropdown-head">
+              <div class="profile-dropdown-name" id="profile-dropdown-name">—</div>
+              <div class="profile-dropdown-email" id="profile-dropdown-email">—</div>
+              <div class="profile-dropdown-meta" id="profile-dropdown-meta">—</div>
+            </div>
+            <a class="profile-dropdown-item" href="history.html" id="auth-history-btn" hidden>
+              <i data-lucide="history"></i>
+              <span>My extracts</span>
+            </a>
+            <button type="button" class="profile-dropdown-item" id="auth-admin-btn" hidden>
+              <i data-lucide="shield"></i>
+              <span>Admin console</span>
+            </button>
+            <button type="button" class="profile-dropdown-item profile-dropdown-danger" id="auth-logout-btn">
+              <i data-lucide="log-out"></i>
+              <span>Sign out</span>
+            </button>
+          </div>
         </div>
       </div>
     </header>
 
-    <!-- Main Workspace -->
-    <main class="app-main">
-      
-      <!-- LEFT COLUMN: Document Input & Cog-Search Chat -->
-      <section class="left-panel">
-        
-        <!-- Drag & Drop Upload Card -->
-        <div class="glass-card upload-card" id="drop-zone">
-          <input type="file" id="file-input" accept=".pdf,.txt,.doc,.docx,.jpg,.jpeg,.png" style="display: none;">
-          <div class="upload-content">
-            <div class="upload-icon-wrapper">
-              <i data-lucide="upload-cloud" class="upload-icon"></i>
-            </div>
-            <h3>Upload Engineering Document</h3>
-            <p class="upload-subtext">Drag & drop your PDF, Word, or TXT manual here, or <span class="browse-link" id="browse-btn">browse files</span></p>
-            <p class="upload-formats">Supported formats: PDF, DOC/DOCX, TXT, JPG/PNG (Max size 1GB)</p>
-          </div>
+    <!-- Settings drawer (collapsed by default) -->
+    <aside class="tool-drawer" id="settings-drawer" hidden>
+      <div class="tool-drawer-head">
+        <div class="card-title">
+          <i data-lucide="sliders" class="accent-icon"></i>
+          <h2>AI Parsing Engine Settings</h2>
+        </div>
+        <button type="button" class="tool-drawer-close" data-drawer-close title="Close">&times;</button>
+      </div>
+      <div class="settings-body">
+        <div class="form-group">
+          <label for="equipment-category">Equipment Category (Manifest)</label>
+          <select id="equipment-category" class="settings-select">
+            <option value="Default" selected>O&amp;M Manual</option>
+            <option value="Logbook">Field History / Logbook</option>
+          </select>
+          <p id="equipment-category-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">
+            Choose whether you are uploading an O&amp;M manual or history cards / logbooks.
+          </p>
+        </div>
 
-          <!-- Optional PDF Page Range Selector -->
-          <div class="page-range-row" id="page-range-row" onclick="event.stopPropagation()">
-            <div class="page-range-field">
-              <label for="page-range-start">From Page</label>
-              <input type="number" id="page-range-start" min="1" placeholder="1" class="settings-input">
+        <div class="form-group">
+          <label for="gemini-model-select">Choose AI Model</label>
+          <select id="gemini-model-select" class="settings-select" aria-describedby="gemini-model-policy-hint">
+            <option value="gemini-3.5-flash" selected>gemini-3.5-flash</option>
+          </select>
+          <p class="settings-hint" id="gemini-model-policy-hint" hidden></p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- AI Assistant drawer (collapsed by default) -->
+    <aside class="tool-drawer tool-drawer-chat" id="chat-drawer" hidden>
+      <div class="tool-drawer-head">
+        <div class="card-title">
+          <i data-lucide="sparkles" class="accent-icon"></i>
+          <h2>AI Assistant</h2>
+        </div>
+        <div class="copilot-header-meta">
+          <span class="badge badge-muted" id="copilot-quota-badge" title="Copilot answers use API tokens">AI 5/day</span>
+        </div>
+        <button type="button" class="tool-drawer-close" data-drawer-close title="Close">&times;</button>
+      </div>
+
+      <div class="chat-container">
+        <div class="chat-messages" id="chat-messages">
+          <!-- Welcome message -->
+          <div class="chat-message assistant">
+            <div class="msg-avatar"><i data-lucide="bot"></i></div>
+            <div class="msg-content">
+              <p>Welcome! Upload a manual to extract registries, then ask Copilot about the document.</p>
             </div>
-            <span class="page-range-sep">&ndash;</span>
-            <div class="page-range-field">
-              <label for="page-range-end">To Page</label>
-              <input type="number" id="page-range-end" min="1" placeholder="Last" class="settings-input">
-            </div>
-            <p class="page-range-hint">PDF only. Leave blank to parse all pages (max 5000 per run). Example: 500 &ndash; 600 to parse only that range.</p>
           </div>
-          
-          <!-- Parsing Progress Overlay (Hidden by default) -->
-          <div class="progress-overlay" id="progress-overlay">
-            <div class="spinner"></div>
-            <h4 id="progress-title">Extracting Document Text...</h4>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill" id="progress-fill"></div>
-            </div>
-            <p class="progress-subtext" id="progress-status">Initializing PDF.js scraper...</p>
-            <button class="btn btn-danger" id="cancel-extract-btn" style="margin-top: 1rem; padding: 0.4rem 1rem; display: flex; align-items: center; gap: 0.5rem; border-radius: 8px;">
-              <i data-lucide="x-circle"></i>
-              <span>Cancel Extraction</span>
+        </div>
+
+        <form class="chat-input-area" id="chat-form">
+          <div class="ask-selected-bar" id="ask-selected-bar" hidden>
+            <span class="ask-selected-label" id="ask-selected-label">Row selected</span>
+            <button type="button" class="ask-selected-btn" id="ask-selected-btn" title="Ask Copilot about this registry row">
+              <i data-lucide="message-circle"></i>
+              <span>Ask about row</span>
+            </button>
+            <button type="button" class="ask-selected-clear" id="ask-selected-clear" title="Clear selection">Clear</button>
+          </div>
+          <div class="chat-input-row">
+            <input type="text" id="chat-input" placeholder="Ask a question about the preloaded or uploaded manual..." required autocomplete="off">
+            <button type="submit" class="send-btn" title="Send Question">
+              <i data-lucide="send"></i>
             </button>
           </div>
-        </div>
+        </form>
+      </div>
+    </aside>
 
-        <!-- Local AI Engine Configuration Card -->
-        <div class="glass-card settings-card">
-          <div class="card-header">
-            <div class="card-title">
-              <i data-lucide="sliders" class="accent-icon"></i>
-              <h2>AI Parsing Engine Settings</h2>
-            </div>
-            <div class="settings-header-badge" id="ollama-status-badge">
-              <span class="status-dot offline"></span>
-              <span class="status-text">Local Heuristics</span>
-            </div>
-          </div>
-          <div class="settings-body">
-            <div class="form-group">
-              <label for="engine-mode">Extraction Engine Mode</label>
-              <select id="engine-mode" class="settings-select">
-                <option value="gemini" selected>Gemini API (Cloud, Fast + Vision)</option>
-                <option value="ollama">Ollama (Local, Intelligent)</option>
-                <option value="heuristics">Heuristics (Fast, No AI)</option>
-              </select>
-            </div>
-            
-            <div class="form-group" id="parse-strategy-group">
-              <label for="parse-strategy">Parse Strategy (For Ollama/Gemini)</label>
-              <select id="parse-strategy" class="settings-select">
-                <option value="native" selected>Native Text (Fast)</option>
-                <option value="ocr">OCR Vision (Scanned/Handwritten)</option>
-              </select>
-            </div>
-            
-            <div class="form-group">
-              <label for="equipment-category">Equipment Category (Manifest)</label>
-              <select id="equipment-category" class="settings-select">
-                <option value="Default" selected>Default (O&amp;M)</option>
-                <option value="Logbook">Field History / Logbook</option>
-              </select>
-              <p id="equipment-category-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">
-                O&amp;M manuals use Default. History cards / logbooks need Field History + OCR Vision.
-              </p>
-            </div>
-            
-            <div id="ollama-settings-group" style="display: none;">
-              <div class="form-group">
-                <label for="ollama-url">Ollama API Endpoint</label>
-                <input type="text" id="ollama-url" value="http://localhost:11434" class="settings-input" placeholder="e.g. http://localhost:11434">
-                <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;">Any Ollama-compatible server works here, including local engines like NoLlama.</p>
-              </div>
-              <div class="form-row">
-                <div class="form-group" style="flex: 1;">
-                  <label for="ollama-model-select">Active Ollama Model</label>
-                  <select id="ollama-model-select" class="settings-select">
-                    <!-- Loaded dynamically -->
-                  </select>
-                  <input type="text" id="ollama-model-input" class="settings-input" style="display: none;" placeholder="Or type model name manually...">
-                </div>
-                <button type="button" class="btn btn-secondary" id="btn-test-ollama" style="align-self: flex-end; height: 38px; margin-bottom: 0px; margin-left: 8px; border-radius: 8px;">
-                  <i data-lucide="refresh-cw"></i>
-                  <span>Sync</span>
-                </button>
-              </div>
-              <div class="ollama-info" id="ollama-info-text">
-                Ollama not verified. Click "Sync" to check local models.
-              </div>
-            </div>
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
 
-            <div id="gemini-settings-group" style="display: none;">
-              <div class="form-group">
-                <label for="gemini-api-key">Gemini API Key</label>
-                <div class="form-row" style="gap: 8px; align-items: flex-end;">
-                  <input type="password" id="gemini-api-key" class="settings-input" placeholder="Paste key here (never commit keys)" autocomplete="off" spellcheck="false" style="flex: 1;">
-                  <button type="button" class="btn btn-secondary" id="btn-clear-gemini-key" title="Remove key from this browser" style="height: 38px; border-radius: 8px; white-space: nowrap;">
-                    <i data-lucide="key-round"></i>
-                    <span>Clear</span>
-                  </button>
-                </div>
-                <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;">Use a Google AI Studio key (<code>AIza...</code> or <code>AQ....</code>) from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" style="color: var(--accent-cyan);">aistudio.google.com/apikey</a>. Saved in <strong>this browser only</strong> — not in source/git. Rotate any key that was previously hardcoded.</p>
-              </div>
-              <div class="form-row">
-                <div class="form-group" style="flex: 1;">
-                  <label for="gemini-model-select">Gemini Model</label>
-                  <select id="gemini-model-select" class="settings-select">
-                    <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite — Flash-Lite (budget / high-volume)</option>
-                    <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite — Flash-Lite (cheapest 2.5)</option>
-                    <option value="gemini-3.5-flash" selected>gemini-3.5-flash — Flash (best for dense & scanned manuals)</option>
-                    <option value="gemini-2.5-flash">gemini-2.5-flash — Flash (fast / efficient 2.5)</option>
-                    <option value="gemini-3.1-pro-preview">gemini-3.1-pro — Pro (advanced reasoning)</option>
-                    <option value="gemini-2.5-pro">gemini-2.5-pro — Pro (deep reasoning 2.5)</option>
-                  </select>
-                </div>
-                <button type="button" class="btn btn-secondary" id="btn-test-gemini" style="align-self: flex-end; height: 38px; margin-bottom: 0px; margin-left: 8px; border-radius: 8px;">
-                  <i data-lucide="refresh-cw"></i>
-                  <span>Verify Key</span>
-                </button>
-              </div>
-              <div class="ollama-info" id="gemini-info-text">
-                Gemini not verified. Click "Verify Key" to test the connection.
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Cognitive Search Chatbot Card -->
-        <div class="glass-card search-card">
-          <div class="card-header">
-            <div class="card-title">
-              <i data-lucide="sparkles" class="accent-icon"></i>
-              <h2>AI Contextual Copilot</h2>
-            </div>
-            <span class="badge">Semantic Search</span>
-          </div>
-          
-          <div class="chat-container">
-            <div class="chat-messages" id="chat-messages">
-              <!-- Welcome message -->
-              <div class="chat-message assistant">
-                <div class="msg-avatar"><i data-lucide="bot"></i></div>
-                <div class="msg-content">
-                  <p>Welcome! Please **upload or drag-and-drop** an engineering user manual (PDF or TXT) to get started.</p>
-                  <p>Once uploaded, my cognitive extraction engine will automatically parse the document to compile a structured maintenance and spare parts registry, and you can perform contextual searches on the manual here.</p>
-                </div>
-              </div>
-            </div>
-            
-            <form class="chat-input-area" id="chat-form">
-              <input type="text" id="chat-input" placeholder="Ask a question about the preloaded or uploaded manual..." required autocomplete="off">
-              <button type="submit" class="send-btn" title="Send Question">
-                <i data-lucide="send"></i>
-              </button>
-            </form>
-          </div>
-        </div>
-
-      </section>
-
-      <!-- RIGHT COLUMN: Extracted Database & Grid Controls -->
+    <!-- Main Workspace: full-width registry -->
+    <main class="app-main">
       <section class="right-panel">
-        
+
         <!-- Stats Bar -->
         <div class="stats-grid">
           <div class="stat-card">
@@ -295,6 +259,42 @@
               <h2 class="stat-value" id="count-troubleshooting">0</h2>
             </div>
           </div>
+          <!-- Logbook-only stats (Field History mode) -->
+          <div class="stat-card logbook-stat" style="display: none;">
+            <div class="stat-icon-wrapper green-glow"><i data-lucide="package-check"></i></div>
+            <div class="stat-info">
+              <span class="stat-label">Parts Renewed</span>
+              <h2 class="stat-value" id="count-log-parts">0</h2>
+            </div>
+          </div>
+          <div class="stat-card logbook-stat" style="display: none;">
+            <div class="stat-icon-wrapper purple-glow"><i data-lucide="users"></i></div>
+            <div class="stat-info">
+              <span class="stat-label">Technicians</span>
+              <h2 class="stat-value" id="count-log-techs">0</h2>
+            </div>
+          </div>
+          <div class="stat-card logbook-stat" style="display: none;">
+            <div class="stat-icon-wrapper amber-glow"><i data-lucide="calendar-days"></i></div>
+            <div class="stat-info">
+              <span class="stat-label">Latest Entry</span>
+              <h2 class="stat-value stat-value-sm" id="count-log-latest">—</h2>
+            </div>
+          </div>
+          <div class="stat-card logbook-stat" style="display: none;">
+            <div class="stat-icon-wrapper red-glow"><i data-lucide="sticky-note"></i></div>
+            <div class="stat-info">
+              <span class="stat-label">Remarks Noted</span>
+              <h2 class="stat-value" id="count-log-remarks">0</h2>
+            </div>
+          </div>
+          <button type="button" class="stat-card quality-score-card" id="card-quality-score" title="View extraction quality details" aria-haspopup="dialog">
+            <div class="stat-icon-wrapper blue-glow" id="quality-score-icon"><i data-lucide="shield-check"></i></div>
+            <div class="stat-info">
+              <span class="stat-label">Extraction Quality</span>
+              <h2 class="stat-value" id="count-overall-score">—</h2>
+            </div>
+          </button>
         </div>
 
         <!-- Central Grid Panel -->
@@ -317,7 +317,7 @@
                   </button>
                 </div>
               </div>
-              
+
               <div class="filter-tabs" id="filter-tabs">
                 <button class="tab-btn active" data-filter="all">All Intervals</button>
                 <button class="tab-btn" data-filter="hours">Hourly</button>
@@ -325,16 +325,29 @@
                 <button class="tab-btn" data-filter="months">Monthly</button>
                 <button class="tab-btn" data-filter="years">Yearly</button>
               </div>
+              <div class="filter-tabs" id="spare-filter-tabs" style="display: none;">
+                <button class="tab-btn active" data-spare-filter="all">All Types</button>
+                <button class="tab-btn" data-spare-filter="critical">Critical</button>
+                <button class="tab-btn" data-spare-filter="consumable">Consumable</button>
+                <button class="tab-btn" data-spare-filter="standard">Standard</button>
+                <button class="tab-btn" data-spare-filter="unspecified">Unspecified</button>
+              </div>
             </div>
-            
+
             <div class="toolbar-right">
-              <!-- Inline Text Search -->
+              <div class="grid-search-bar confidence-filter-bar">
+                <select id="confidence-filter" class="settings-select" title="Filter by extraction confidence" aria-label="Confidence filter">
+                  <option value="all">All Quality Levels</option>
+                  <option value="high">High Confidence (≥ 80%)</option>
+                  <option value="review">Needs Review (&lt; 80%)</option>
+                  <option value="low">Low Confidence (&lt; 50%)</option>
+                </select>
+              </div>
               <div class="grid-search-bar">
                 <i data-lucide="search" class="search-icon"></i>
                 <input type="text" id="grid-search" placeholder="Filter table records...">
               </div>
-              
-              <!-- Excel Export Button -->
+
               <button class="btn btn-primary" id="export-btn">
                 <i data-lucide="file-spreadsheet"></i>
                 <span>Export Excel (3 sheets)</span>
@@ -353,6 +366,7 @@
                   <th style="width: 200px;">Sub-system / Component</th>
                   <th style="width: 130px;">Maintenance Routine</th>
                   <th style="width: 350px;">Required Maintenance Checks / Instructions</th>
+                  <th class="confidence-cell" style="width: 80px; text-align: center;">Confidence</th>
                   <th style="width: 70px;">Page</th>
                   <th style="width: 70px; text-align: center;">Actions</th>
                 </tr>
@@ -379,6 +393,7 @@
                   <th style="width: 70px; text-align: center;">Stock Qty</th>
                   <th style="width: 100px;">Warranty Period</th>
                   <th style="width: 150px; text-align: center;">Frequency of Use</th>
+                  <th class="confidence-cell" style="width: 80px; text-align: center;">Confidence</th>
                   <th style="width: 70px;">Page</th>
                   <th style="width: 70px; text-align: center;">Actions</th>
                 </tr>
@@ -387,7 +402,7 @@
                 <!-- Javascript will inject rows dynamically -->
               </tbody>
             </table>
-            
+
             <!-- Troubleshooting Table -->
             <table class="data-table" id="troubleshooting-table" style="display: none;">
               <thead>
@@ -397,6 +412,7 @@
                   <th style="width: 200px;">Sub-component</th>
                   <th style="width: 200px;">Problem</th>
                   <th style="width: 350px;">Root-cause / Solution</th>
+                  <th class="confidence-cell" style="width: 80px; text-align: center;">Confidence</th>
                   <th style="width: 70px;">Page</th>
                   <th style="width: 70px; text-align: center;">Actions</th>
                 </tr>
@@ -405,14 +421,12 @@
                 <!-- Javascript will inject rows dynamically -->
               </tbody>
             </table>
-            
 
-            
             <!-- Empty state -->
             <div class="table-empty-state" id="table-empty" style="display: none;">
               <i data-lucide="folder-open" class="empty-icon"></i>
               <h3>No matching records found</h3>
-              <p>Try adjusting your filters or query a different term in the AI Contextual Copilot.</p>
+              <p>Try adjusting your filters or query a different term in the AI Assistant.</p>
             </div>
           </div>
 
@@ -422,13 +436,118 @@
               <i data-lucide="plus"></i>
               <span>Add Custom Record</span>
             </button>
-            <p class="grid-disclaimer">Double-click on any cell to inline-edit text before exporting.</p>
+            <p class="grid-disclaimer">AI-generated output. Engineer review recommended prior to use</p>
           </div>
         </div>
 
       </section>
-
     </main>
+  </div>
+
+  <!-- Parsing progress: centered floating card (draggable) -->
+  <div class="progress-overlay" id="progress-overlay" role="status" aria-live="polite">
+    <div class="progress-drag-handle" id="progress-drag-handle" title="Drag to move">
+      <span class="progress-drag-grip" aria-hidden="true"></span>
+      <span>Processing</span>
+    </div>
+    <div class="spinner"></div>
+    <h4 id="progress-title">Extracting Document Text...</h4>
+    <div class="progress-bar-container">
+      <div class="progress-bar-fill" id="progress-fill"></div>
+    </div>
+    <p class="progress-subtext" id="progress-status">Initializing PDF.js scraper...</p>
+    <button class="btn btn-danger" id="cancel-extract-btn" style="margin-top: 1rem; padding: 0.4rem 1rem; display: flex; align-items: center; gap: 0.5rem; border-radius: 8px;">
+      <i data-lucide="x-circle"></i>
+      <span>Cancel Extraction</span>
+    </button>
+  </div>
+
+  <!-- Extraction quality details -->
+  <div id="quality-score-modal" class="page-context-modal" hidden>
+    <div class="page-context-panel quality-score-panel" role="dialog" aria-modal="true" aria-labelledby="quality-score-title">
+      <div class="page-context-header">
+        <h3 id="quality-score-title">Extraction Quality</h3>
+        <button type="button" id="quality-score-close" class="page-context-close" title="Close">&times;</button>
+      </div>
+      <div class="quality-score-body">
+        <p class="quality-score-value" id="quality-score-value">—</p>
+        <p class="quality-score-level" id="quality-score-level"></p>
+        <p class="quality-score-message" id="quality-score-message"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Page context viewer (Copilot jump-to-page) -->
+  <div id="page-context-modal" class="page-context-modal" hidden>
+    <div class="page-context-panel" role="dialog" aria-modal="true" aria-labelledby="page-context-title">
+      <div class="page-context-header">
+        <h3 id="page-context-title">Page</h3>
+        <button type="button" id="page-context-close" class="page-context-close" title="Close">&times;</button>
+      </div>
+      <pre id="page-context-body" class="page-context-body"></pre>
+    </div>
+  </div>
+
+  <!-- Sign-in landing page -->
+  <div id="login-modal" class="auth-landing" hidden>
+    <button type="button" id="login-close" class="auth-landing-close" title="Continue without signing in">&times;</button>
+    <div class="auth-landing-inner">
+
+      <!-- Brand / value side -->
+      <div class="auth-landing-brand">
+        <span class="auth-landing-kicker">
+          <i data-lucide="sparkles"></i>
+          Intelligent Document Processing
+        </span>
+        <div class="auth-landing-logo">
+          <img src="assets/idp-logo.png" alt="IDP logo">
+          <div>
+            <h1>IDP</h1>
+            <p>For O&amp;M Manuals and History Cards</p>
+          </div>
+        </div>
+        <p class="auth-landing-tagline">
+          Turn equipment manuals into structured maintenance, spare-parts and troubleshooting registries — ready to review, edit and export.
+        </p>
+        <ul class="auth-landing-points">
+          <li>
+            <span class="auth-landing-point-icon"><i data-lucide="scan-text"></i></span>
+            <div>
+              <strong>AI extraction</strong>
+              <span>Reads every page of PDF manuals and scanned history cards</span>
+            </div>
+          </li>
+          <li>
+            <span class="auth-landing-point-icon"><i data-lucide="table-2"></i></span>
+            <div>
+              <strong>Structured registries</strong>
+              <span>Maintenance tasks, spare parts and troubleshooting in editable tables</span>
+            </div>
+          </li>
+          <li>
+            <span class="auth-landing-point-icon"><i data-lucide="file-spreadsheet"></i></span>
+            <div>
+              <strong>Excel export</strong>
+              <span>One click to a clean multi-sheet workbook</span>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Sign-in card -->
+      <div class="auth-landing-card" role="dialog" aria-modal="true" aria-labelledby="login-title">
+        <h3 id="login-title">Welcome back</h3>
+        <p class="auth-landing-card-sub">Sign in to open your workspace</p>
+        <form id="login-form" class="auth-form auth-landing-form">
+          <label>Email<input type="email" id="login-email" class="settings-input" required autocomplete="username" value="admin@omniparse.local"></label>
+          <label>Password<input type="password" id="login-password" class="settings-input" required autocomplete="current-password"></label>
+          <p id="login-error" class="auth-error"></p>
+          <button type="submit" class="btn btn-primary auth-landing-submit">Sign in</button>
+          <p class="admin-muted">Use the account provided by your administrator.</p>
+        </form>
+      </div>
+
+    </div>
   </div>
 
   <!-- Lucide icons activator script -->
@@ -437,8 +556,102 @@
       lucide.createIcons();
     });
   </script>
-  
-  <!-- Logic script link -->
-  <script src="app.js?v=15"></script>
+
+  <!-- Drawer (collapsed panels) behavior — layout-only, independent of app.js -->
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      const backdrop = document.getElementById('drawer-backdrop');
+      const drawers = {
+        settings: { btn: document.getElementById('rail-settings-btn'), panel: document.getElementById('settings-drawer') },
+        chat: { btn: document.getElementById('rail-chat-btn'), panel: document.getElementById('chat-drawer') }
+      };
+
+      function closeAll() {
+        Object.values(drawers).forEach(({ btn, panel }) => {
+          panel.hidden = true;
+          btn.classList.remove('active');
+          btn.setAttribute('aria-expanded', 'false');
+        });
+        backdrop.hidden = true;
+      }
+
+      function toggle(name) {
+        const { btn, panel } = drawers[name];
+        const willOpen = panel.hidden;
+        closeAll();
+        if (willOpen) {
+          panel.hidden = false;
+          btn.classList.add('active');
+          btn.setAttribute('aria-expanded', 'true');
+          backdrop.hidden = false;
+          if (name === 'chat') {
+            const dot = document.getElementById('rail-chat-dot');
+            if (dot) dot.hidden = true;
+            const input = document.getElementById('chat-input');
+            if (input) input.focus();
+          }
+        }
+      }
+
+      drawers.settings.btn.addEventListener('click', () => toggle('settings'));
+      drawers.chat.btn.addEventListener('click', () => toggle('chat'));
+      backdrop.addEventListener('click', closeAll);
+      document.querySelectorAll('[data-drawer-close]').forEach(b => b.addEventListener('click', closeAll));
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeAll();
+      });
+
+      // Show a notification dot on the AI Assistant icon when a new chat
+      // message arrives while the drawer is closed (e.g. extract summaries).
+      const chatMessages = document.getElementById('chat-messages');
+      const chatDot = document.getElementById('rail-chat-dot');
+      if (chatMessages && chatDot) {
+        new MutationObserver(() => {
+          if (drawers.chat.panel.hidden) chatDot.hidden = false;
+        }).observe(chatMessages, { childList: true });
+      }
+
+      // Upload popup: clicking Upload (or the header strip) opens the
+      // page-range + file-chooser popover instead of the picker directly.
+      const uploadStrip = document.getElementById('drop-zone');
+      const uploadPopover = document.getElementById('page-range-row');
+      const uploadMenuBtn = document.getElementById('upload-menu-btn');
+      const uploadFileInput = document.getElementById('file-input');
+      const uploadOverlay = document.getElementById('progress-overlay');
+
+      function setUploadPopover(open) {
+        uploadPopover.hidden = !open;
+        uploadMenuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      }
+
+      // Capture phase so app.js's direct open-file-picker click handler is bypassed
+      uploadStrip.addEventListener('click', (e) => {
+        if (e.target.closest('#page-range-row')) return; // inside popup: allow native behavior
+        if (uploadOverlay.classList.contains('active')) return; // extracting: leave as-is
+        e.stopPropagation();
+        setUploadPopover(uploadPopover.hidden);
+      }, true);
+
+      uploadFileInput.addEventListener('change', () => setUploadPopover(false));
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.header-upload')) setUploadPopover(false);
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') setUploadPopover(false);
+      });
+
+      // Doc badge: only visible once a document is loaded (hide the
+      // "No Document Loaded" empty state entirely in this layout).
+      const docBadge = document.getElementById('active-doc-name');
+      function syncDocBadge() {
+        docBadge.classList.toggle('empty', /no document loaded/i.test(docBadge.textContent || ''));
+      }
+      syncDocBadge();
+      new MutationObserver(syncDocBadge).observe(docBadge, { childList: true, subtree: true, characterData: true });
+    });
+  </script>
+
+  <script src="auth-admin.js?v=35"></script>
+  <script src="app.js?v=60"></script>
 </body>
 </html>

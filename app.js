@@ -15,7 +15,7 @@ let troubleshootingRegistry = [];
 let activeRegistryTab = "maintenance"; // "maintenance", "spare_parts", "troubleshooting"
 
 // Document storage for contextual searches
-let loadedPages = []; 
+let loadedPages = [];
 
 // Initialize document loading with preloaded drawworks manual text (for chatbot)
 function initPreloadedContext() {
@@ -23,14 +23,49 @@ function initPreloadedContext() {
 }
 
 // Global active filters
-let currentTabFilter = "all";
+let currentTabFilter = "all"; // maintenance intervals
+let currentSpareFilter = "all"; // spare part types
 let currentSearchQuery = "";
+let currentConfidenceFilter = "all";
 let highlightRecordIds = [];
+let selectedRegistryRowId = null;
 
 // Globals to store actively filtered data for Excel export
 let filteredMaintenance = [];
 let filteredSpareParts = [];
 let filteredTroubleshooting = [];
+let lastExtractMeta = null;
+
+function formatConfidenceCell(row) {
+  if (!row || row.confidence == null || row.confidence === "") return "—";
+  const n = Number(row.confidence);
+  if (Number.isNaN(n)) return "—";
+  return `${Math.round(n * 100)}%`;
+}
+
+function isLowConfidenceRow(row) {
+  if (!row || row.confidence == null || row.confidence === "") return false;
+  const n = Number(row.confidence);
+  return !Number.isNaN(n) && n < 0.7;
+}
+
+function handleConfidenceFilterChange(filterValue) {
+  currentConfidenceFilter = filterValue || "all";
+  highlightRecordIds = [];
+  renderGrid();
+}
+
+function filterByConfidence(rows) {
+  if (!Array.isArray(rows) || currentConfidenceFilter === "all") return rows;
+  return rows.filter(row => {
+    const score = row.confidence != null && row.confidence !== "" ? Number(row.confidence) : 1.0;
+    if (Number.isNaN(score)) return currentConfidenceFilter === "all";
+    if (currentConfidenceFilter === "high") return score >= 0.8;
+    if (currentConfidenceFilter === "review") return score < 0.8;
+    if (currentConfidenceFilter === "low") return score < 0.5;
+    return true;
+  });
+}
 
 // Safe Lucide icon rendering wrapper
 function safeCreateIcons() {
@@ -39,49 +74,8 @@ function safeCreateIcons() {
   }
 }
 
-/* -------------------------------------------------------------
- * Theme: dark (default) + light, persisted in localStorage
- * ------------------------------------------------------------- */
-const THEME_STORAGE_KEY = "idp_theme";
-
-function getPreferredTheme() {
-  try {
-    const saved = localStorage.getItem(THEME_STORAGE_KEY);
-    if (saved === "light" || saved === "dark") return saved;
-  } catch (e) {}
-  return "dark";
-}
-
-function applyTheme(theme) {
-  const next = theme === "light" ? "light" : "dark";
-  document.documentElement.setAttribute("data-theme", next);
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, next);
-  } catch (e) {}
-
-  const toggleBtn = document.getElementById("theme-toggle-btn");
-  const toggleLabel = document.getElementById("theme-toggle-label");
-  if (toggleBtn) {
-    toggleBtn.title = next === "dark" ? "Switch to light mode" : "Switch to dark mode";
-    toggleBtn.setAttribute("aria-label", next === "dark" ? "Switch to light mode" : "Switch to dark mode");
-  }
-  if (toggleLabel) {
-    toggleLabel.textContent = next === "dark" ? "Light" : "Dark";
-  }
-  safeCreateIcons();
-}
-
-function initThemeToggle() {
-  applyTheme(getPreferredTheme());
-  const toggleBtn = document.getElementById("theme-toggle-btn");
-  if (!toggleBtn) return;
-  toggleBtn.addEventListener("click", () => {
-    const current = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
-    applyTheme(current === "dark" ? "light" : "dark");
-  });
-}
-
-initThemeToggle();
+// Theme toggle lives in auth-admin.js (shared with admin.html). Do not redeclare
+// THEME_STORAGE_KEY / applyTheme here — duplicate const breaks the whole script.
 
 /* -------------------------------------------------------------
  * Python FastAPI extraction backend
@@ -197,28 +191,39 @@ async function confirmLargePdfIfNeeded(pages, fileSizeBytes = 0) {
 }
 
 async function extractViaPythonApi(file, pageCountHint = null) {
-  const form = new FormData();
-  form.append("file", file, file.name);
-  form.append("engine", engineMode === "ollama" ? "ollama" : "gemini");
-  // History cards are image-only scans — always request OCR for Logbook.
-  const strategy = activeEquipmentCategory === "Logbook"
-    ? "ocr"
-    : (parseStrategy === "native" ? "native" : "ocr");
-  form.append("parse_strategy", strategy);
-  form.append("gemini_api_key", geminiApiKey || "");
-  form.append("gemini_model", geminiModel || "gemini-3.5-flash");
-  form.append("ollama_url", ollamaUrl || "http://localhost:11434");
-  form.append("ollama_model", ollamaModel || "");
-  form.append("equipment_category", activeEquipmentCategory || "Default");
+  // Prefer admin/local browser key when present; otherwise API uses GEMINI_API_KEY from backend/.env
+  refreshAdminTestGeminiKey();
+  function buildExtractForm() {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("engine", engineMode === "ollama" ? "ollama" : "gemini");
+    // History cards are image-only scans — always request OCR for Logbook.
+    const strategy = activeEquipmentCategory === "Logbook"
+      ? "ocr"
+      : (parseStrategy === "native" ? "native" : "ocr");
+    form.append("parse_strategy", strategy);
+    form.append("gemini_api_key", geminiApiKey || "");
+    form.append("gemini_model", (() => {
+      const allowed = getAssignedGeminiModels();
+      const chosen = geminiModel || "gemini-3.5-flash";
+      if (allowed && allowed.length && !allowed.includes(chosen)) return allowed[0];
+      return chosen;
+    })());
+    form.append("ollama_url", ollamaUrl || "http://localhost:11434");
+    form.append("ollama_model", ollamaModel || "");
+    form.append("equipment_category", activeEquipmentCategory || "Default");
 
-  const range = getConfiguredPageRange();
-  if (range.start) form.append("page_start", String(range.start));
-  if (range.end) form.append("page_end", String(range.end));
+    const range = getConfiguredPageRange();
+    if (range.start) form.append("page_start", String(range.start));
+    if (range.end) form.append("page_end", String(range.end));
 
-  if (learnedPatterns && learnedPatterns.length > 0) {
-    form.append("learned_patterns", JSON.stringify(learnedPatterns));
+    if (learnedPatterns && learnedPatterns.length > 0) {
+      form.append("learned_patterns", JSON.stringify(learnedPatterns));
+    }
+    return form;
   }
 
+  const range = getConfiguredPageRange();
   const estimatedPages = (() => {
     if (range.start && range.end) return Math.max(1, range.end - range.start + 1);
     if (range.start && pageCountHint) return Math.max(1, pageCountHint - range.start + 1);
@@ -229,22 +234,107 @@ async function extractViaPythonApi(file, pageCountHint = null) {
   })();
 
   // Full-book runs need many hours. Scale timeout; cap at 24h.
+  // Async job+poll path avoids CloudFront's ~120s origin timeout.
   const timeoutMs = Math.min(
     24 * 60 * 60 * 1000,
     Math.max(2 * 60 * 60 * 1000, estimatedPages * 15 * 1000)
   );
 
-  progressStatus.innerText = `Sending to Python API (${apiBaseUrl})...`;
-  progressFill.style.width = "12%";
-  appendChatSystemMessage(
-    `Python API extracting **~${estimatedPages}** page(s)` +
-    `${parseStrategy === "ocr" ? " with **OCR Vision**" : " (native text)"}` +
-    ` via **${engineMode === "ollama" ? ollamaModel : geminiModel}**. ` +
-    `Large manuals can take a long time — keep this tab open.`
-  );
+  progressStatus.innerText = `Sending to Python API (${apiBaseUrl || "same-origin"})...`;
+  progressFill.style.width = "8%";
 
-  const controller = new AbortController();
+  if (typeof window.requireAuthForApi === "function") window.requireAuthForApi();
+  const authHeaders = (typeof window.getAuthHeaders === "function") ? window.getAuthHeaders() : {};
+
   const startedAt = Date.now();
+  let createResp;
+  try {
+    createResp = await fetch(`${apiBaseUrl}/api/extract/jobs`, {
+      method: "POST",
+      body: buildExtractForm(),
+      headers: authHeaders
+    });
+  } catch (err) {
+    if (err.message === "Sign in required") throw err;
+    // Older API without /jobs — fall back to sync extract.
+    return extractViaPythonApiSync(buildExtractForm(), authHeaders, timeoutMs, estimatedPages, startedAt);
+  }
+
+  if (createResp.status === 404) {
+    return extractViaPythonApiSync(buildExtractForm(), authHeaders, timeoutMs, estimatedPages, startedAt);
+  }
+
+  if (!createResp.ok) {
+    let detail = "";
+    try {
+      const errJson = await createResp.json();
+      detail = errJson.detail || JSON.stringify(errJson);
+    } catch (e) {
+      detail = await createResp.text();
+    }
+    throw new Error(detail || `API HTTP ${createResp.status}`);
+  }
+
+  const created = await createResp.json();
+  const jobId = created && created.job_id;
+  if (!jobId) throw new Error("API did not return an extraction job id");
+
+  progressStatus.innerText = "Job queued — waiting for API workers...";
+  progressFill.style.width = "12%";
+
+  const pollIntervalMs = 2000;
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    let statusResp;
+    try {
+      statusResp = await fetch(`${apiBaseUrl}/api/extract/jobs/${encodeURIComponent(jobId)}`, {
+        method: "GET",
+        headers: authHeaders
+      });
+    } catch (err) {
+      // Transient network blip — keep polling until overall timeout.
+      progressStatus.innerText = `Waiting for job status… ${formatElapsed(Date.now() - startedAt)} elapsed`;
+      continue;
+    }
+
+    if (!statusResp.ok) {
+      let detail = "";
+      try {
+        const errJson = await statusResp.json();
+        detail = errJson.detail || JSON.stringify(errJson);
+      } catch (e) {
+        detail = await statusResp.text();
+      }
+      throw new Error(detail || `Job status HTTP ${statusResp.status}`);
+    }
+
+    const job = await statusResp.json();
+    const pct = Math.min(92, 12 + Math.floor((Number(job.progress) || 0) * 80));
+    progressFill.style.width = `${pct}%`;
+    const msg = job.message || job.status || "running";
+    progressStatus.innerText =
+      `Python API job ${job.status || "running"}… ${formatElapsed(Date.now() - startedAt)} elapsed` +
+      ` — ${msg}`;
+
+    if (job.status === "done") {
+      if (!job.result) throw new Error("Job finished but returned no result");
+      progressFill.style.width = "85%";
+      progressStatus.innerText = "Merging registries into grid...";
+      return job.result;
+    }
+    if (job.status === "error") {
+      throw new Error(job.error || job.message || "Extraction job failed");
+    }
+  }
+
+  throw new Error(
+    `Python API job timed out after ${formatElapsed(timeoutMs)}. ` +
+    `Use a smaller From/To page range, switch to Native text (if searchable), or try Flash-Lite.`
+  );
+}
+
+async function extractViaPythonApiSync(form, authHeaders, timeoutMs, estimatedPages, startedAt) {
+  const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const tickId = setInterval(() => {
     const elapsed = formatElapsed(Date.now() - startedAt);
@@ -260,9 +350,11 @@ async function extractViaPythonApi(file, pageCountHint = null) {
     resp = await fetch(`${apiBaseUrl}/api/extract`, {
       method: "POST",
       body: form,
+      headers: authHeaders,
       signal: controller.signal
     });
   } catch (err) {
+    if (err.message === "Sign in required") throw err;
     if (err.name === "AbortError") {
       throw new Error(
         `Python API timed out after ${formatElapsed(timeoutMs)}. ` +
@@ -291,47 +383,170 @@ async function extractViaPythonApi(file, pageCountHint = null) {
   return resp.json();
 }
 
-function applyApiExtractResult(result, file) {
-  const maint = (result && result.maintenance) || [];
-  const spares = (result && result.spare_parts) || [];
-  const trouble = (result && result.troubleshooting) || [];
-
-  maintenanceRegistry = maint.map((row, idx) => ({ ...row, id: row.id || idx + 1 }));
-  sparePartsRegistry = spares.map((row, idx) => ({ ...row, id: row.id || idx + 1 }));
-  troubleshootingRegistry = trouble.map((row, idx) => ({ ...row, id: row.id || idx + 1 }));
-
-  loadedPages = ((result && result.pages) || []).map(p => ({
-    pageNum: p.pageNum,
-    text: p.text || ""
-  }));
-
-  if (typeof assembleRegistriesInPageOrder === "function") {
-    assembleRegistriesInPageOrder();
+function selectRegistryTab(mode) {
+  if (!mode || !registryModeTabs) return;
+  const btn = registryModeTabs.querySelector(`.mode-tab-btn[data-mode="${mode}"]`);
+  if (!btn) return;
+  document.querySelectorAll(".mode-tab-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  activeRegistryTab = mode;
+  if (mode === "maintenance") {
+    currentTabFilter = "all";
+    resetFilterTabActive(filterTabs, "data-filter", "all");
+  } else if (mode === "spare_parts") {
+    currentSpareFilter = "all";
+    resetFilterTabActive(spareFilterTabs, "data-spare-filter", "all");
   }
+  if (maintenanceTable && sparePartsTable && troubleshootingTable) {
+    maintenanceTable.style.display = mode === "maintenance" ? "table" : "none";
+    sparePartsTable.style.display = mode === "spare_parts" ? "table" : "none";
+    troubleshootingTable.style.display = mode === "troubleshooting" ? "table" : "none";
+  }
+  if (typeof syncRegistryFilterTabs === "function") syncRegistryFilterTabs();
+}
 
-  const meta = (result && result.meta) || {};
-  (meta.warnings || []).forEach(w => appendChatSystemMessage(`⚠️ ${w}`));
-
-  progressFill.style.width = "100%";
-  progressStatus.innerText = "Extraction finished!";
-  progressOverlay.classList.remove("active");
-  activeDocName.innerHTML = `<i data-lucide="file-text"></i><span>${escapeHTML(file.name)}</span>`;
-  activeDocName.style.borderColor = "var(--accent-cyan-glow)";
-  activeDocName.style.color = "var(--accent-cyan)";
-  activeDocName.style.background = "hsla(190, 90%, 50%, 0.05)";
-  safeCreateIcons();
-
-  const mCount = meta.maintenance_count != null ? meta.maintenance_count : maintenanceRegistry.length;
-  const sCount = meta.spare_parts_count != null ? meta.spare_parts_count : sparePartsRegistry.length;
-  const tCount = meta.troubleshooting_count != null ? meta.troubleshooting_count : troubleshootingRegistry.length;
-  appendChatSystemMessage(
-    `Python API extracted **${mCount}** maintenance tasks, **${sCount}** spare parts, and **${tCount}** troubleshooting issues from **"${file.name}"**` +
-    `${meta.pages_processed ? ` (${meta.pages_processed}/${meta.pages_total || meta.pages_processed} pages)` : ""}` +
-    `${meta.engine ? ` via **${meta.engine}**` : ""}.`
+/** Prefer a tab that actually has rows so extract output is visible immediately. */
+function preferTabWithResults() {
+  const counts = [
+    ["maintenance", maintenanceRegistry.length],
+    ["spare_parts", sparePartsRegistry.length],
+    ["troubleshooting", troubleshootingRegistry.length]
+  ];
+  const currentCount = (
+    activeRegistryTab === "spare_parts" ? sparePartsRegistry.length :
+    activeRegistryTab === "troubleshooting" ? troubleshootingRegistry.length :
+    maintenanceRegistry.length
   );
-  renderGrid();
-  isExtracting = false;
-  offerSaveExcelAfterExtraction(file);
+  if (currentCount > 0) return;
+  const best = counts.sort((a, b) => b[1] - a[1])[0];
+  if (best && best[1] > 0) selectRegistryTab(best[0]);
+}
+
+function resetProgressCardPosition() {
+  if (!progressOverlay) return;
+  progressOverlay.style.left = "";
+  progressOverlay.style.top = "";
+  progressOverlay.style.right = "";
+  progressOverlay.style.bottom = "";
+  progressOverlay.style.transform = "";
+  progressOverlay.classList.remove("is-dragging");
+}
+
+function setExtractingUi(active, title, status) {
+  isExtracting = !!active;
+  if (dropZone) dropZone.classList.toggle("is-processing", !!active);
+  if (progressOverlay) {
+    progressOverlay.classList.toggle("active", !!active);
+    if (active) {
+      // Always reopen from the middle of the page for a new run.
+      resetProgressCardPosition();
+    } else {
+      resetProgressCardPosition();
+    }
+  }
+  if (active) {
+    if (progressFill) progressFill.style.width = "0%";
+    if (title && progressTitle) progressTitle.innerText = title;
+    if (status && progressStatus) progressStatus.innerText = status;
+  }
+}
+
+function clearExtractingUi() {
+  setExtractingUi(false);
+}
+
+/** Drag the floating processing card anywhere on the page. */
+function initProgressCardDrag() {
+  const handle = document.getElementById("progress-drag-handle");
+  if (!progressOverlay || !handle || handle.dataset.dragBound === "1") return;
+  handle.dataset.dragBound = "1";
+
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let originLeft = 0;
+  let originTop = 0;
+
+  const onPointerDown = (e) => {
+    if (!progressOverlay.classList.contains("active")) return;
+    if (e.button != null && e.button !== 0) return;
+    const rect = progressOverlay.getBoundingClientRect();
+    // Switch from centered transform to absolute left/top for free dragging.
+    progressOverlay.style.left = `${rect.left}px`;
+    progressOverlay.style.top = `${rect.top}px`;
+    progressOverlay.style.transform = "none";
+    originLeft = rect.left;
+    originTop = rect.top;
+    startX = e.clientX;
+    startY = e.clientY;
+    dragging = true;
+    progressOverlay.classList.add("is-dragging");
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  };
+
+  const onPointerMove = (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const cardW = progressOverlay.offsetWidth;
+    const cardH = progressOverlay.offsetHeight;
+    const margin = 8;
+    const maxLeft = Math.max(margin, window.innerWidth - cardW - margin);
+    const maxTop = Math.max(margin, window.innerHeight - cardH - margin);
+    const nextLeft = Math.min(maxLeft, Math.max(margin, originLeft + dx));
+    const nextTop = Math.min(maxTop, Math.max(margin, originTop + dy));
+    progressOverlay.style.left = `${nextLeft}px`;
+    progressOverlay.style.top = `${nextTop}px`;
+  };
+
+  const onPointerUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    progressOverlay.classList.remove("is-dragging");
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
+
+  handle.addEventListener("pointerdown", onPointerDown);
+  handle.addEventListener("pointermove", onPointerMove);
+  handle.addEventListener("pointerup", onPointerUp);
+  handle.addEventListener("pointercancel", onPointerUp);
+}
+
+function applyApiExtractResult(result, file) {
+  try {
+    const maint = (result && result.maintenance) || [];
+    const spares = (result && result.spare_parts) || [];
+    const trouble = (result && result.troubleshooting) || [];
+
+    maintenanceRegistry = maint.map((row, idx) => ({ ...row, id: row.id || idx + 1 }));
+    sparePartsRegistry = spares.map((row, idx) => ({ ...row, id: row.id || idx + 1 }));
+    troubleshootingRegistry = trouble.map((row, idx) => ({ ...row, id: row.id || idx + 1 }));
+
+    loadedPages = ((result && result.pages) || []).map(p => ({
+      pageNum: p.pageNum,
+      text: p.text || ""
+    }));
+
+    if (typeof assembleRegistriesInPageOrder === "function") {
+      assembleRegistriesInPageOrder();
+    }
+
+    const meta = (result && result.meta) || {};
+    lastExtractMeta = meta;
+    (meta.warnings || []).forEach(w => appendChatSystemMessage(`⚠️ ${w}`));
+
+    if (progressFill) progressFill.style.width = "100%";
+    if (progressStatus) progressStatus.innerText = "Extraction finished!";
+    setActiveDocBadge(file.name);
+    safeCreateIcons();
+
+    preferTabWithResults();
+    renderGrid();
+    offerSaveExcelAfterExtraction(file);
+  } finally {
+    clearExtractingUi();
+  }
 }
 
 // DOM Elements
@@ -348,8 +563,11 @@ const countParts = document.getElementById("count-parts");
 const countConsumables = document.getElementById("count-consumables");
 const countTime = document.getElementById("count-time");
 const countTroubleshooting = document.getElementById("count-troubleshooting");
+const countOverallScore = document.getElementById("count-overall-score");
 const filterTabs = document.getElementById("filter-tabs");
+const spareFilterTabs = document.getElementById("spare-filter-tabs");
 const gridSearch = document.getElementById("grid-search");
+const confidenceFilter = document.getElementById("confidence-filter");
 const addRowBtn = document.getElementById("add-row-btn");
 const exportBtn = document.getElementById("export-btn");
 const dropZone = document.getElementById("drop-zone");
@@ -366,6 +584,24 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const chatMessages = document.getElementById("chat-messages");
 
+/** Header badge: show filename as soon as upload starts; idle = No Document Loaded. */
+function setActiveDocBadge(fileName) {
+  if (!activeDocName) return;
+  const name = String(fileName || "").trim();
+  if (!name) {
+    activeDocName.innerHTML = `<i data-lucide="file-warning"></i><span>No Document Loaded</span>`;
+    activeDocName.style.borderColor = "hsla(0, 85%, 60%, 0.3)";
+    activeDocName.style.color = "hsl(0, 85%, 65%)";
+    activeDocName.style.background = "hsla(0, 85%, 60%, 0.05)";
+  } else {
+    activeDocName.innerHTML = `<i data-lucide="file-text"></i><span title="${escapeHTML(name)}">${escapeHTML(name)}</span>`;
+    activeDocName.style.borderColor = "var(--accent-cyan-glow)";
+    activeDocName.style.color = "var(--accent-cyan)";
+    activeDocName.style.background = "hsla(190, 90%, 50%, 0.05)";
+  }
+  if (typeof safeCreateIcons === "function") safeCreateIcons();
+}
+
 // Registry Mode Switching Listener
 if (registryModeTabs) {
   registryModeTabs.addEventListener("click", (e) => {
@@ -375,135 +611,88 @@ if (registryModeTabs) {
     document.querySelectorAll(".mode-tab-btn").forEach(btn => btn.classList.remove("active"));
     tabBtn.classList.add("active");
     activeRegistryTab = tabBtn.getAttribute("data-mode");
+
+    // Reset each registry's filter set to "All …" when switching modes
+    if (activeRegistryTab === "maintenance") {
+      currentTabFilter = "all";
+      resetFilterTabActive(filterTabs, "data-filter", "all");
+    } else if (activeRegistryTab === "spare_parts") {
+      currentSpareFilter = "all";
+      resetFilterTabActive(spareFilterTabs, "data-spare-filter", "all");
+    }
     
     if (activeRegistryTab === "maintenance") {
       maintenanceTable.style.display = "table";
       sparePartsTable.style.display = "none";
       troubleshootingTable.style.display = "none";
-      filterTabs.style.display = "flex";
     } else if (activeRegistryTab === "spare_parts") {
       maintenanceTable.style.display = "none";
       sparePartsTable.style.display = "table";
       troubleshootingTable.style.display = "none";
-      filterTabs.style.display = "none";
     } else if (activeRegistryTab === "troubleshooting") {
       maintenanceTable.style.display = "none";
       sparePartsTable.style.display = "none";
       troubleshootingTable.style.display = "table";
-      filterTabs.style.display = "none";
     }
+    syncRegistryFilterTabs();
     
     highlightRecordIds = []; // clear RAG filters on switch
+    clearSelectedRegistryRow();
     renderGrid();
   });
 }
 
-// AI Engine configuration state
-let engineMode = "gemini"; // "gemini" | "ollama" | "heuristics"
-let parseStrategy = "native"; // "native" or "ocr"
+// AI Engine configuration state — Gemini only (server-managed API key).
+let engineMode = "gemini";
+let parseStrategy = "native"; // auto: "ocr" for Field History / Logbook
 let ollamaUrl = "http://localhost:11434";
 let ollamaModel = "";
 let isExtracting = false;
 let abortExtraction = false;
 
-const ENGINE_MODE_KEY = "omniparse_engine_mode";
-try {
-  const savedEngineMode = localStorage.getItem(ENGINE_MODE_KEY);
-  if (savedEngineMode === "gemini" || savedEngineMode === "ollama" || savedEngineMode === "heuristics") {
-    engineMode = savedEngineMode;
-  }
-} catch (e) {}
-
-function saveEngineMode() {
-  try {
-    localStorage.setItem(ENGINE_MODE_KEY, engineMode);
-  } catch (e) {}
-}
-
 function isOllamaMode() {
-  return engineMode === "ollama";
+  return false;
 }
 
 function isGeminiMode() {
-  return engineMode === "gemini";
+  return true;
 }
 
-// Persisted Ollama connection settings — remembers the last endpoint/model used
-// across page reloads instead of always resetting to the hardcoded default above.
-const OLLAMA_SETTINGS_KEY = "omniparse_ollama_settings";
-let savedOllamaSettings = null;
-try {
-  const rawOllamaSettings = localStorage.getItem(OLLAMA_SETTINGS_KEY);
-  if (rawOllamaSettings) {
-    savedOllamaSettings = JSON.parse(rawOllamaSettings);
-    if (savedOllamaSettings && savedOllamaSettings.url) {
-      ollamaUrl = savedOllamaSettings.url;
-    }
-    if (savedOllamaSettings && savedOllamaSettings.model) {
-      ollamaModel = savedOllamaSettings.model;
-    }
-  }
-} catch (e) {
-  console.error("Failed to load saved Ollama settings", e);
-}
-
-function saveOllamaSettings() {
-  try {
-    localStorage.setItem(OLLAMA_SETTINGS_KEY, JSON.stringify({ url: ollamaUrl, model: ollamaModel }));
-  } catch (e) {}
-}
-
-// Google Gemini API (cloud) engine configuration state.
-// SECURITY: never hardcode API keys in source. Keys are entered in Settings and stored only in
-// this browser's localStorage (not committed to git). Anyone with the page can still see the key
-// in DevTools/network — for public deploys, proxy through a backend instead.
+// Google Gemini — model selection only. API key comes from the Python API env (never from the browser UI).
 let geminiApiKey = "";
 let geminiModel = "gemini-3.5-flash"; // Best active Flash for dense/scanned manuals
 
 const GEMINI_SETTINGS_KEY = "omniparse_gemini_settings";
+// Same localStorage key as auth-admin.js, but a distinct identifier —
+// both scripts share the global scope, so a duplicate `const` breaks app.js entirely.
+const LOCAL_TEST_GEMINI_STORAGE_KEY = "omniparse_admin_test_gemini_key";
 const GEMINI_FALLBACK_MODEL = "gemini-3.5-flash";
-// Full active lineup: Flash-Lite (budget) → Flash (workhorse) → Pro (reasoning).
-// Gemini 1.x / 2.0 names are retired; 2.5 + 3.x remain selectable.
+// Active lineup only (live Gemini API). Pro = gemini-3.1-pro-preview (+ 2.5-pro).
+// There is no gemini-3.6-pro; 3.6 ships as Flash.
+// Dropdown shows the bare model id only.
 const GEMINI_RECOMMENDED_MODELS = [
-  {
-    id: "gemini-3.1-flash-lite",
-    label: "gemini-3.1-flash-lite — Flash-Lite (budget / high-volume)"
-  },
-  {
-    id: "gemini-2.5-flash-lite",
-    label: "gemini-2.5-flash-lite — Flash-Lite (cheapest 2.5)"
-  },
-  {
-    id: "gemini-3.5-flash",
-    label: "gemini-3.5-flash — Flash (best for dense & scanned manuals)"
-  },
-  {
-    id: "gemini-2.5-flash",
-    label: "gemini-2.5-flash — Flash (fast / efficient 2.5)"
-  },
-  {
-    id: "gemini-3.1-pro-preview",
-    label: "gemini-3.1-pro — Pro (advanced reasoning)"
-  },
-  {
-    id: "gemini-2.5-pro",
-    label: "gemini-2.5-pro — Pro (deep reasoning 2.5)"
-  }
+  { id: "gemini-3.6-flash" },
+  { id: "gemini-3.5-flash-lite" },
+  { id: "gemini-3.5-flash" },
+  { id: "gemini-3.1-pro-preview" },
+  { id: "gemini-2.5-flash" },
+  { id: "gemini-2.5-pro" }
 ];
 const RETIRED_GEMINI_MODEL_PATTERNS = [
   /^gemini-1\./i,
   /^gemini-2\.0-/i,
+  /^gemini-2\.5-flash-lite/i,
   /^gemini-pro$/i,
   /^gemini-flash$/i
 ];
 
 // Map curated IDs → live API aliases (preview suffixes, short names, etc.).
 const GEMINI_MODEL_ALIASES = {
-  "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview"],
-  "gemini-2.5-flash-lite": ["gemini-2.5-flash-lite", "gemini-2.5-flash-lite-preview"],
+  "gemini-3.6-flash": ["gemini-3.6-flash"],
+  "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite"],
   "gemini-3.5-flash": ["gemini-3.5-flash", "gemini-3.5-flash-preview"],
+  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.1-pro"],
   "gemini-2.5-flash": ["gemini-2.5-flash"],
-  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.1-pro", "gemini-3-pro-preview"],
   "gemini-2.5-pro": ["gemini-2.5-pro"]
 };
 
@@ -519,6 +708,15 @@ function normalizeGeminiModel(modelName) {
   // Treat bare 3.1 Pro as the preview API id used in the dropdown.
   if (name === "gemini-3.1-pro") return "gemini-3.1-pro-preview";
   return name;
+}
+
+/** Collapses API aliases (e.g. gemini-3.5-flash-preview) onto the curated id. */
+function canonicalGeminiModelId(modelId) {
+  const id = String(modelId || "").trim().replace(/^models\//, "");
+  for (const [canonical, aliases] of Object.entries(GEMINI_MODEL_ALIASES)) {
+    if (canonical === id || aliases.includes(id)) return canonical;
+  }
+  return id;
 }
 
 function resolveGeminiModelId(preferredId, availableModelIds) {
@@ -539,26 +737,6 @@ function resolveGeminiModelId(preferredId, availableModelIds) {
   return fuzzy || preferred;
 }
 
-function geminiModelLabel(modelId) {
-  const id = normalizeGeminiModel(modelId);
-  const recommended = GEMINI_RECOMMENDED_MODELS.find(m => {
-    const aliases = GEMINI_MODEL_ALIASES[m.id] || [m.id];
-    return m.id === id || aliases.includes(id);
-  });
-  if (recommended) return recommended.label;
-  const lower = id.toLowerCase();
-  if (lower.includes("flash-lite") || lower.includes("flashlite")) {
-    return `${id} — Flash-Lite: best for high-volume, simpler extraction`;
-  }
-  if (lower.includes("pro")) {
-    return `${id} — Pro: best for dense manuals`;
-  }
-  if (lower.includes("flash")) {
-    return `${id} — Flash: better for dense manuals`;
-  }
-  return id;
-}
-
 function populateGeminiModelSelect(availableModelIds, preferredModelId) {
   if (!geminiModelInput) return;
 
@@ -566,20 +744,34 @@ function populateGeminiModelSelect(availableModelIds, preferredModelId) {
     .map(id => String(id || "").trim().replace(/^models\//, ""))
     .filter(Boolean);
 
+  const policyAllowed = getAssignedGeminiModels();
+  const curated = GEMINI_RECOMMENDED_MODELS.map(m => m.id);
+  // When signed in with assigned models, only those appear — never the full curated list.
+  const sourceIds = policyAllowed && policyAllowed.length
+    ? policyAllowed
+    : curated;
+
   geminiModelInput.innerHTML = "";
 
-  // Always show the full curated lineup (never dump every API model).
-  GEMINI_RECOMMENDED_MODELS.forEach(model => {
+  const seen = new Set();
+  sourceIds.forEach(id => {
+    const resolved = resolveGeminiModelId(id, available.length ? available : [id]);
+    // Dedupe on the canonical id so aliases of the same model appear once.
+    const canonical = canonicalGeminiModelId(resolved);
+    if (seen.has(canonical)) return;
+    seen.add(canonical);
     const option = document.createElement("option");
-    // Prefer a live API id when Verify Key returned aliases/preview names.
-    option.value = resolveGeminiModelId(model.id, available);
-    option.innerText = model.label;
+    option.value = resolved;
+    option.innerText = canonical;
     geminiModelInput.appendChild(option);
   });
 
-  const preferred = resolveGeminiModelId(preferredModelId || geminiModel, available);
-  const optionIds = Array.from(geminiModelInput.options).map(o => o.value);
+  const preferred = resolveGeminiModelId(preferredModelId || geminiModel, available.length ? available : sourceIds);
+  const optionIds = Array.from(geminiModelInput.options || []).map(o => o.value);
   let selected = optionIds.includes(preferred) ? preferred : null;
+  if (!selected && policyAllowed && policyAllowed.length) {
+    selected = optionIds.find(id => policyAllowed.includes(id)) || optionIds[0];
+  }
   if (!selected) {
     selected = optionIds.find(id => id.includes("gemini-3.5-flash"))
       || optionIds.find(id => id.includes("gemini-3.1-flash-lite"))
@@ -587,25 +779,76 @@ function populateGeminiModelSelect(availableModelIds, preferredModelId) {
   }
   geminiModelInput.value = selected;
   geminiModel = normalizeGeminiModel(selected);
+  geminiModelInput.disabled = !!(policyAllowed && policyAllowed.length <= 1 && !isAuthAdminUser());
 }
+
+function getAssignedGeminiModels() {
+  try {
+    const u = window.authState && window.authState.user;
+    if (!u) return null;
+    if (Array.isArray(u.allowed_models) && u.allowed_models.length) {
+      return u.allowed_models.map(m => String(m || "").trim()).filter(Boolean);
+    }
+    if (u.preferred_model) return [String(u.preferred_model).trim()];
+  } catch (e) {}
+  return null;
+}
+
+function isAuthAdminUser() {
+  try {
+    return !!(window.authState && window.authState.user && window.authState.user.role === "admin");
+  } catch (e) {
+    return false;
+  }
+}
+
+/** Local-only test key from Admin console (browser localStorage). Never used on AWS hosts. */
+function refreshAdminTestGeminiKey() {
+  geminiApiKey = "";
+  try {
+    const host = typeof location !== "undefined" ? location.hostname : "";
+    const isLocal = !host || host === "localhost" || host === "127.0.0.1";
+    // Deployed/AWS UI must use server GEMINI_API_KEY — ignore any leftover browser key.
+    if (!isLocal) return;
+    geminiApiKey = String(localStorage.getItem(LOCAL_TEST_GEMINI_STORAGE_KEY) || "").trim();
+  } catch (e) {}
+}
+
+window.refreshAdminTestGeminiKey = refreshAdminTestGeminiKey;
+
+function applyAssignedGeminiModels(allowedModels, preferredModelId, isAdmin) {
+  const allowed = (allowedModels || []).map(m => String(m || "").trim()).filter(Boolean);
+  if (!allowed.length || !geminiModelInput) return;
+  if (window.authState && window.authState.user) {
+    window.authState.user.allowed_models = allowed.slice();
+    if (preferredModelId) window.authState.user.preferred_model = preferredModelId;
+  }
+  populateGeminiModelSelect(allowed, preferredModelId || allowed[0]);
+  geminiModelInput.disabled = !isAdmin && allowed.length <= 1;
+  saveGeminiSettings();
+}
+
+window.applyAssignedGeminiModels = applyAssignedGeminiModels;
+window.getAssignedGeminiModels = getAssignedGeminiModels;
 
 let savedGeminiSettings = null;
 try {
   const rawGeminiSettings = localStorage.getItem(GEMINI_SETTINGS_KEY);
   if (rawGeminiSettings) {
     savedGeminiSettings = JSON.parse(rawGeminiSettings);
-    if (savedGeminiSettings && typeof savedGeminiSettings.apiKey === "string") {
-      geminiApiKey = savedGeminiSettings.apiKey.trim();
-    }
     if (savedGeminiSettings && savedGeminiSettings.model) {
       geminiModel = normalizeGeminiModel(savedGeminiSettings.model);
       if (geminiModel !== savedGeminiSettings.model) {
         savedGeminiSettings.model = geminiModel;
         localStorage.setItem(GEMINI_SETTINGS_KEY, JSON.stringify({
-          apiKey: geminiApiKey,
           model: geminiModel
         }));
       }
+    }
+    // Drop any legacy browser-stored API key — keys are server-managed only.
+    if (savedGeminiSettings && savedGeminiSettings.apiKey) {
+      delete savedGeminiSettings.apiKey;
+      localStorage.setItem(GEMINI_SETTINGS_KEY, JSON.stringify({ model: geminiModel }));
     }
   }
 } catch (e) {
@@ -614,36 +857,10 @@ try {
 
 function saveGeminiSettings() {
   try {
-    // Persist only in local browser storage — never write secrets into source files.
     localStorage.setItem(GEMINI_SETTINGS_KEY, JSON.stringify({
-      apiKey: String(geminiApiKey || "").trim(),
       model: geminiModel
     }));
   } catch (e) {}
-}
-
-function clearGeminiApiKey() {
-  geminiApiKey = "";
-  if (geminiApiKeyInput) geminiApiKeyInput.value = "";
-  saveGeminiSettings();
-}
-
-function looksLikeGeminiApiKey(key) {
-  const raw = String(key || "").trim();
-  // AI Studio now issues auth keys as "AQ...." and older standard keys as "AIza...".
-  return /^(AIza[0-9A-Za-z_\-]{20,}|AQ\.[0-9A-Za-z_\-]{20,})$/.test(raw);
-}
-
-function geminiAuthHint(key) {
-  const raw = String(key || "").trim();
-  if (!raw) return "Paste a Gemini API key from Google AI Studio (https://aistudio.google.com/apikey).";
-  if (raw.startsWith("ya29.")) {
-    return "This looks like an OAuth access token, not a Gemini API key. Create an API key at https://aistudio.google.com/apikey.";
-  }
-  if (!looksLikeGeminiApiKey(raw)) {
-    return "Unexpected key format. Gemini AI Studio keys usually start with AIza... or AQ.";
-  }
-  return "";
 }
 
 function buildGeminiUrl(path) {
@@ -786,176 +1003,140 @@ async function fetchManifest() {
 fetchManifest();
 
 // Settings DOM Elements
-const engineModeSelect = document.getElementById("engine-mode");
-const ollamaSettingsGroup = document.getElementById("ollama-settings-group");
-const ollamaUrlInput = document.getElementById("ollama-url");
-const ollamaModelSelect = document.getElementById("ollama-model-select");
-const btnTestOllama = document.getElementById("btn-test-ollama");
-const ollamaInfoText = document.getElementById("ollama-info-text");
-const ollamaStatusBadge = document.getElementById("ollama-status-badge");
 const cancelExtractBtn = document.getElementById("cancel-extract-btn");
 const equipmentCategorySelect = document.getElementById("equipment-category");
-const parseStrategySelect = document.getElementById("parse-strategy");
-const parseStrategyGroup = document.getElementById("parse-strategy-group");
-const geminiSettingsGroup = document.getElementById("gemini-settings-group");
-const geminiApiKeyInput = document.getElementById("gemini-api-key");
 const geminiModelInput = document.getElementById("gemini-model-select");
-const btnTestGemini = document.getElementById("btn-test-gemini");
-const btnClearGeminiKey = document.getElementById("btn-clear-gemini-key");
-const geminiInfoText = document.getElementById("gemini-info-text");
 
-// Reflect any restored/persisted endpoint into the input immediately
-if (ollamaUrlInput && ollamaUrl) {
-  ollamaUrlInput.value = ollamaUrl;
-}
-if (geminiApiKeyInput && geminiApiKey) {
-  geminiApiKeyInput.value = geminiApiKey;
-}
 if (geminiModelInput) {
   populateGeminiModelSelect([], geminiModel || GEMINI_FALLBACK_MODEL);
 }
 
 // Settings event listeners
-if (parseStrategySelect) {
-  parseStrategySelect.addEventListener("change", (e) => {
-    parseStrategy = e.target.value;
-  });
+const EQUIPMENT_CATEGORY_STORAGE_KEY = "idp_equipment_category";
+
+/** Show/hide a stat card by the id of its value element. */
+function setStatCardVisible(valueElId, visible) {
+  const el = document.getElementById(valueElId);
+  const card = el && el.closest(".stat-card");
+  if (card) card.style.display = visible ? "" : "none";
 }
+
+/**
+ * Applies everything category-dependent in one place: parse strategy, table
+ * headers, which registry tabs/stat cards are shown, and labels. Called on
+ * category change and on page load (restored category).
+ */
+function applyEquipmentCategoryUi() {
+  const isLogbook = activeEquipmentCategory === "Logbook";
+
+  // Field history cards are scanned photos — force OCR Vision internally.
+  parseStrategy = isLogbook ? "ocr" : "native";
+
+  // Logbook extraction only produces history records, so the Spare Parts and
+  // Troubleshooting registries would always be empty — hide them entirely.
+  if (registryModeTabs) {
+    registryModeTabs.querySelectorAll('[data-mode="spare_parts"], [data-mode="troubleshooting"]').forEach((btn) => {
+      btn.style.display = isLogbook ? "none" : "";
+    });
+  }
+  if (isLogbook && activeRegistryTab !== "maintenance") {
+    selectRegistryTab("maintenance");
+  }
+  setStatCardVisible("count-parts", !isLogbook);
+  setStatCardVisible("count-consumables", !isLogbook);
+  setStatCardVisible("count-time", !isLogbook);
+  setStatCardVisible("count-troubleshooting", !isLogbook);
+  document.querySelectorAll(".logbook-stat").forEach((card) => {
+    card.style.display = isLogbook ? "" : "none";
+  });
+
+  const rulesLabel = countRules && countRules.closest(".stat-info")
+    ? countRules.closest(".stat-info").querySelector(".stat-label")
+    : null;
+  if (rulesLabel) rulesLabel.innerText = isLogbook ? "History Records" : "Maintenance Rules";
+
+  const maintTabLabel = registryModeTabs
+    ? registryModeTabs.querySelector('[data-mode="maintenance"] span')
+    : null;
+  if (maintTabLabel) maintTabLabel.innerText = isLogbook ? "Field History Records" : "Maintenance Tasks";
+
+  const exportBtnLabel = document.querySelector("#export-btn span");
+  if (exportBtnLabel) exportBtnLabel.innerText = isLogbook ? "Export Excel (Field History)" : "Export Excel (3 sheets)";
+
+  const maintenanceHeaders = document.getElementById("maintenance-table-headers");
+  if (maintenanceHeaders) {
+    if (isLogbook) {
+      maintenanceHeaders.innerHTML = `
+        <th style="width: 60px;">ID</th>
+        <th style="width: 150px;">Date</th>
+        <th style="width: 300px;">Maintenance Work Description</th>
+        <th style="width: 200px;">Parts Renewed</th>
+        <th style="width: 150px;">Attended By</th>
+        <th>Remarks</th>
+        <th class="confidence-cell" style="width: 80px; text-align: center;">Confidence</th>
+        <th style="width: 70px;">Page</th>
+        <th style="width: 70px; text-align: center;">Actions</th>
+      `;
+    } else {
+      maintenanceHeaders.innerHTML = `
+        <th style="width: 60px;">ID</th>
+        <th style="width: 150px;">Equipment Title</th>
+        <th style="width: 200px;">Sub-system / Component</th>
+        <th style="width: 150px;">Maintenance Routine</th>
+        <th>Checks & Instructions</th>
+        <th class="confidence-cell" style="width: 80px; text-align: center;">Confidence</th>
+        <th style="width: 70px;">Page</th>
+        <th style="width: 70px; text-align: center;">Actions</th>
+      `;
+    }
+  }
+
+  // Maintenance-interval filters don't apply to logbook rows.
+  syncRegistryFilterTabs();
+  updateDashboardMetrics();
+  renderGrid();
+}
+
 if (equipmentCategorySelect) {
   equipmentCategorySelect.addEventListener("change", (e) => {
     activeEquipmentCategory = e.target.value;
     console.log("Switched equipment category to:", activeEquipmentCategory);
+    try { localStorage.setItem(EQUIPMENT_CATEGORY_STORAGE_KEY, activeEquipmentCategory); } catch (_) {}
 
-    // Field history cards are scanned photos — force OCR Vision.
     if (activeEquipmentCategory === "Logbook") {
-      parseStrategy = "ocr";
-      if (parseStrategySelect) {
-        parseStrategySelect.value = "ocr";
-      }
-      if (engineMode === "heuristics") {
-        appendChatSystemMessage(
-          "ℹ️ Field History / Logbook works best with **Gemini** or **Ollama** + **OCR Vision** (these PDFs have no text layer)."
-        );
-      } else {
-        appendChatSystemMessage(
-          "ℹ️ Field History / Logbook: **OCR Vision** enabled. Use a small From/To page range on CloudFront (origin timeout ~60s)."
-        );
-      }
-      // Maintenance-interval filters don't apply to logbook rows.
-      if (filterTabs) filterTabs.style.display = "none";
-      if (activeRegistryTab !== "maintenance" && registryModeTabs) {
-        const maintBtn = registryModeTabs.querySelector('[data-mode="maintenance"]');
-        if (maintBtn) maintBtn.click();
-      }
-    } else if (filterTabs && activeRegistryTab === "maintenance") {
-      filterTabs.style.display = "flex";
+      appendChatSystemMessage(
+        "ℹ️ Field History / Logbook: OCR Vision enabled automatically. Use a small From/To page range on CloudFront (origin timeout ~60s)."
+      );
     }
+    applyEquipmentCategoryUi();
+  });
 
-    // Update table headers for logbook mode
-    const maintenanceHeaders = document.getElementById("maintenance-table-headers");
-    if (maintenanceHeaders) {
-      if (activeEquipmentCategory === "Logbook") {
-        maintenanceHeaders.innerHTML = `
-          <th style="width: 60px;">ID</th>
-          <th style="width: 150px;">Date</th>
-          <th style="width: 300px;">Maintenance Work Description</th>
-          <th style="width: 200px;">Parts Renewed</th>
-          <th style="width: 150px;">Attended By</th>
-          <th>Remarks</th>
-          <th style="width: 70px;">Page</th>
-          <th style="width: 70px; text-align: center;">Actions</th>
-        `;
-      } else {
-        maintenanceHeaders.innerHTML = `
-          <th style="width: 60px;">ID</th>
-          <th style="width: 150px;">Equipment Title</th>
-          <th style="width: 200px;">Sub-system / Component</th>
-          <th style="width: 150px;">Maintenance Routine</th>
-          <th>Checks & Instructions</th>
-          <th style="width: 70px;">Page</th>
-          <th style="width: 70px; text-align: center;">Actions</th>
-        `;
-      }
+  // Restore the last selected category so a reload doesn't silently fall back
+  // to the O&M Manual table while the user thinks Field History is active.
+  try {
+    const savedCategory = localStorage.getItem(EQUIPMENT_CATEGORY_STORAGE_KEY);
+    if (savedCategory && equipmentCategorySelect.querySelector(`option[value="${savedCategory}"]`)) {
+      activeEquipmentCategory = savedCategory;
+      equipmentCategorySelect.value = savedCategory;
     }
-    renderGrid();
-  });
-}
-if (engineModeSelect) {
-  engineModeSelect.addEventListener("change", (e) => {
-    engineMode = e.target.value;
-    saveEngineMode();
-    if (engineMode === "ollama") {
-      ollamaSettingsGroup.style.display = "block";
-      if (geminiSettingsGroup) geminiSettingsGroup.style.display = "none";
-      if (parseStrategyGroup) parseStrategyGroup.style.display = "block";
-      updateOllamaStatus("offline", "Ollama Mode Selected");
-      syncOllama(); // Try to sync immediately
-    } else if (engineMode === "gemini") {
-      ollamaSettingsGroup.style.display = "none";
-      if (geminiSettingsGroup) geminiSettingsGroup.style.display = "block";
-      if (parseStrategyGroup) parseStrategyGroup.style.display = "block";
-      updateOllamaStatus("offline", "Gemini API Selected");
-      syncGemini(); // Try to verify the key immediately
-    } else {
-      ollamaSettingsGroup.style.display = "none";
-      if (geminiSettingsGroup) geminiSettingsGroup.style.display = "none";
-      if (parseStrategyGroup) parseStrategyGroup.style.display = "none";
-      updateOllamaStatus("offline", "Local Heuristics");
-    }
-  });
-}
-
-if (ollamaUrlInput) {
-  ollamaUrlInput.addEventListener("change", (e) => {
-    ollamaUrl = e.target.value.trim();
-    saveOllamaSettings();
-  });
-}
-
-if (ollamaModelSelect) {
-  ollamaModelSelect.addEventListener("change", (e) => {
-    ollamaModel = e.target.value;
-    saveOllamaSettings();
-  });
-}
-
-if (btnTestOllama) {
-  btnTestOllama.addEventListener("click", () => {
-    syncOllama();
-  });
-}
-
-if (geminiApiKeyInput) {
-  geminiApiKeyInput.addEventListener("change", (e) => {
-    geminiApiKey = e.target.value.trim();
-    saveGeminiSettings();
-  });
-  geminiApiKeyInput.addEventListener("input", (e) => {
-    geminiApiKey = e.target.value.trim();
-  });
+  } catch (_) {}
+  applyEquipmentCategoryUi();
 }
 
 if (geminiModelInput) {
   geminiModelInput.addEventListener("change", (e) => {
-    geminiModel = normalizeGeminiModel(e.target.value.trim());
-    saveGeminiSettings();
-  });
-}
-
-if (btnTestGemini) {
-  btnTestGemini.addEventListener("click", () => {
-    syncGemini();
-  });
-}
-
-if (btnClearGeminiKey) {
-  btnClearGeminiKey.addEventListener("click", () => {
-    clearGeminiApiKey();
-    if (geminiInfoText) {
-      geminiInfoText.innerText = "API key cleared from this browser. Paste a new key and click Verify Key.";
-      geminiInfoText.className = "ollama-info";
+    const next = normalizeGeminiModel(e.target.value.trim());
+    const allowed = getAssignedGeminiModels();
+    if (allowed && allowed.length && !allowed.includes(next)) {
+      const fallback = allowed[0];
+      geminiModelInput.value = fallback;
+      geminiModel = normalizeGeminiModel(fallback);
+      appendChatSystemMessage(`Model **${next}** is not assigned to your account. Using **${fallback}**.`);
+      saveGeminiSettings();
+      return;
     }
-    updateOllamaStatus("offline", "Key cleared", "");
+    geminiModel = next;
+    saveGeminiSettings();
   });
 }
 
@@ -964,166 +1145,6 @@ if (cancelExtractBtn) {
     abortExtraction = true;
     appendChatSystemMessage("Extraction cancel requested. Halting parser...");
   });
-}
-
-function updateOllamaStatus(status, text, infoClass = "") {
-  if (!ollamaStatusBadge) return;
-  const dot = ollamaStatusBadge.querySelector(".status-dot");
-  const label = ollamaStatusBadge.querySelector(".status-text");
-  
-  dot.className = "status-dot " + status;
-  
-  if (engineMode === "heuristics") {
-    label.innerText = "Local Heuristics";
-    dot.className = "status-dot offline";
-  } else if (engineMode === "gemini") {
-    label.innerText = status === "online" ? "Gemini Active" : "Gemini Offline";
-  } else {
-    label.innerText = status === "online" ? `Ollama Active` : "Ollama Offline";
-  }
-  
-  // Ollama and Gemini each have their own info box in the settings panel (only one is visible
-  // at a time depending on engineMode), so route the status text to whichever is active.
-  const activeInfoEl = engineMode === "gemini" ? geminiInfoText : ollamaInfoText;
-  if (activeInfoEl) {
-    activeInfoEl.className = "ollama-info " + infoClass;
-    if (status === "online") {
-      activeInfoEl.innerText = engineMode === "gemini" ? `Connected successfully! Active model: ${geminiModel}` : `Connected successfully! Active model: ${ollamaModel}`;
-    } else if (status === "syncing") {
-      activeInfoEl.innerText = engineMode === "gemini" ? "Verifying Gemini API key..." : "Syncing local models with Ollama...";
-    } else if (status === "error") {
-      activeInfoEl.innerText = text;
-    } else {
-      activeInfoEl.innerText = engineMode === "gemini" ? "Gemini not verified. Click 'Verify Key' to test the connection." : "Ollama not verified. Click 'Sync' to connect.";
-    }
-  }
-}
-
-async function syncOllama() {
-  if (!isOllamaMode()) {
-    console.log("Skipping Ollama sync — engine mode is", engineMode);
-    return;
-  }
-  const syncIcon = btnTestOllama ? btnTestOllama.querySelector("i") : null;
-  if (syncIcon) syncIcon.classList.add("spin-loading");
-  updateOllamaStatus("syncing", "Syncing...");
-  
-  try {
-    const res = await fetch(`${ollamaUrl}/api/tags`);
-    if (!res.ok) {
-      throw new Error(`HTTP error ${res.status}`);
-    }
-    const data = await res.json();
-    if (syncIcon) syncIcon.classList.remove("spin-loading");
-    
-    if (data.models && data.models.length > 0) {
-      ollamaModelSelect.innerHTML = "";
-      let selectedIndex = 0;
-      let bestPreferenceFound = null;
-      // Remembering the model previously used on THIS endpoint takes priority over the generic heuristics below
-      const rememberedModel = (savedOllamaSettings && savedOllamaSettings.url === ollamaUrl) ? savedOllamaSettings.model : null;
-      data.models.forEach((model, idx) => {
-        const option = document.createElement("option");
-        option.value = model.name;
-        option.innerText = model.name;
-        ollamaModelSelect.appendChild(option);
-        
-        const lowerName = model.name.toLowerCase();
-        if (rememberedModel && model.name === rememberedModel) {
-          selectedIndex = idx;
-          bestPreferenceFound = "remembered";
-        } else if (lowerName.includes("manual") && bestPreferenceFound !== "remembered" && bestPreferenceFound !== "manual") {
-          selectedIndex = idx;
-          bestPreferenceFound = "manual";
-        } else if (lowerName.includes("llama3") && !bestPreferenceFound) {
-          selectedIndex = idx;
-          bestPreferenceFound = "llama3";
-        }
-      });
-      ollamaModelSelect.selectedIndex = selectedIndex;
-      ollamaModel = data.models[selectedIndex].name;
-      updateOllamaStatus("online", "Connected", "success");
-      saveOllamaSettings();
-    } else {
-      throw new Error("No models installed. Pull a model first, e.g. 'ollama run llama3'");
-    }
-  } catch (err) {
-    if (syncIcon) syncIcon.classList.remove("spin-loading");
-    console.error("Ollama connection failed", err);
-    updateOllamaStatus(
-      "error", 
-      `Connection failed: ${err.message}. Ensure Ollama (or NoLlama) is running at ${ollamaUrl} and CORS is enabled.`, 
-      "error"
-    );
-    ollamaModelSelect.innerHTML = `<option value="llama3">llama3 (Fallback)</option>`;
-    ollamaModel = "llama3";
-  }
-}
-
-// Verify the Gemini API key/model by hitting the lightweight models.list endpoint
-async function syncGemini() {
-  const syncIcon = btnTestGemini ? btnTestGemini.querySelector("i") : null;
-  if (syncIcon) syncIcon.classList.add("spin-loading");
-  updateOllamaStatus("syncing", "Verifying...");
-
-  try {
-    // Always read the latest value from the input before verifying.
-    if (geminiApiKeyInput && geminiApiKeyInput.value.trim()) {
-      geminiApiKey = geminiApiKeyInput.value.trim();
-    }
-    if (!geminiApiKey) {
-      throw new Error("No API key entered.");
-    }
-    if (!looksLikeGeminiApiKey(geminiApiKey)) {
-      throw new Error(geminiAuthHint(geminiApiKey) || "Invalid Gemini API key format.");
-    }
-
-    const res = await fetch(buildGeminiUrl("models"), {
-      method: "GET",
-      headers: {
-        "x-goog-api-key": String(geminiApiKey || "").trim()
-      }
-    });
-    if (syncIcon) syncIcon.classList.remove("spin-loading");
-
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      const apiMsg = (errBody.error && errBody.error.message) || `HTTP error ${res.status}`;
-      throw new Error(`${apiMsg} If this persists, create a fresh key at https://aistudio.google.com/apikey`);
-    }
-    const data = await res.json();
-
-    // Google periodically retires model versions (e.g. old "-flash"/"-pro" names stop being
-    // available to new API keys). Only keep models this key can actually call for extraction,
-    // and populate the dropdown from that live list instead of trusting a hardcoded name.
-    const usableModels = (data.models || []).filter(m =>
-      Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent")
-    );
-
-    if (usableModels.length === 0) {
-      throw new Error("Key is valid, but no generateContent-capable models were returned by the API.");
-    }
-
-    if (geminiModelInput) {
-      // Remembering the model previously used with this same key takes priority.
-      const rememberedModel = normalizeGeminiModel(
-        (savedGeminiSettings && savedGeminiSettings.apiKey === geminiApiKey) ? savedGeminiSettings.model : null
-      );
-      const availableIds = usableModels.map(m => m.name.replace(/^models\//, ""));
-      populateGeminiModelSelect(availableIds, rememberedModel || geminiModel || "gemini-3.5-flash");
-    }
-
-    updateOllamaStatus("online", "Connected", "success");
-    saveGeminiSettings();
-  } catch (err) {
-    if (syncIcon) syncIcon.classList.remove("spin-loading");
-    console.error("Gemini connection failed", err);
-    updateOllamaStatus(
-      "error",
-      `Connection failed: ${err.message}. Check your API key and network connection.`,
-      "error"
-    );
-  }
 }
 
 // Helper to sanitize extracted field values to fallback to "NA" if empty or unavailable
@@ -1723,57 +1744,6 @@ function buildTextFromPdfTextContent(textContent) {
 }
 
 
-function shouldProcessPageWithLLM(pageText, pageNum = null) {
-  if (!pageText) return false;
-  if (isLikelyIndexOrTOCPage(pageText, pageNum)) return false;
-  
-  // Reject explicit Table of Contents / Index pages to prevent LLM hallucination
-  const lowerPageText = pageText.toLowerCase();
-  if (lowerPageText.includes("table of contents") || (lowerPageText.includes("index") && !lowerPageText.includes("part"))) {
-    return false;
-  }
-
-  const text = pageText.toLowerCase();
-  const cleanText = text.replace(/\s+/g, ' ');
-  
-  // High-value keywords for maintenance and parts
-  const keywords = (equipmentManifest && equipmentManifest.categories[activeEquipmentCategory]) 
-    ? equipmentManifest.categories[activeEquipmentCategory].keywords 
-    : ["replace", "lubricate", "grease", "inspect", "maintenance", "troubleshoot", "problem", "fault", "cause", "solution"];
-  
-  return keywords.some(kw => cleanText.includes(kw));
-}
-
-async function runOllamaRawTranscription(base64Image) {
-  if (!isOllamaMode()) {
-    throw new Error("Ollama transcription blocked: current engine mode is " + engineMode);
-  }
-  const systemPrompt = `You are a strict OCR engine.
-DO NOT describe the image. DO NOT say "The image shows" or "This is a picture of".
-Your ONLY task is to read the characters and text written in the image and output them.
-If the handwriting is messy, make your absolute best guess at the characters.
-Output ONLY the transcribed text. Absolutely NO conversational text or descriptions.`;
-
-  const fetchBody = {
-    model: ollamaModel,
-    prompt: systemPrompt,
-    stream: false,
-    images: [base64Image],
-    options: { temperature: 0.1 }
-  };
-
-  const response = await fetch(`${ollamaUrl}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fetchBody)
-  });
-
-  if (!response.ok) throw new Error("Ollama network response was not ok");
-  const data = await response.json();
-  return data.response.trim();
-}
-
-// Query local Ollama API to extract structured parts & maintenance instructions
 // Builds the shared extraction instruction prompt used by every LLM backend (Ollama, Gemini, ...).
 // Keeping this in one place ensures the carefully-tuned field-extraction rules (and any future
 // fixes to them) automatically apply to every engine instead of drifting out of sync.
@@ -1807,6 +1777,8 @@ Rules for "maintenance" tasks:
 
 Rules for "spare_parts":
 - Extract items that represent real spare parts, consumables, hardware, or components.
+- Extract EVERY numbered table row on the page. Do not sample or stop after a few examples.
+- Emit spare_parts in the same top-to-bottom order as the PDF table (Item 1, then 2, then 3, …). Never alphabetize by part name.
 - DO NOT extract ordering metadata, procurement fields, or identification labels as parts.
 - Reject list labels or ordering metadata unless there is clear evidence of an actual physical part (for example a concrete component name with valid part/drawing reference context).
 - For "equipment_title", you MUST extract the explicit Table Title, Header, or Caption directly preceding the parts list (e.g. "EXAMPLE_TABLE_TITLE_DO_NOT_COPY"). Do not use random surrounding text. Default to "${cleanDocName}" if there is absolutely no title.
@@ -2099,22 +2071,27 @@ function processRawModelResponse(rawResponseText, docName, pageNum, base64Image,
         } else {
           let title = sanitizeVal(item.equipment_title);
           if (title === "NA") title = cleanDocName;
+          const pdfOrderRaw = parseInt(item.pdf_order, 10);
           return {
             id: 0,
             equipment_title: title,
             subsystem_component: sanitizeVal(item.subsystem_component),
             maintenance_routine: sanitizeVal(item.maintenance_routine),
             checks_instructions: sanitizeVal(item.checks_instructions),
-            page: pageNum
+            page: pageNum,
+            pdf_order: Number.isFinite(pdfOrderRaw) && pdfOrderRaw > 0 ? pdfOrderRaw : undefined
           };
         }
       });
+      // Fill missing pdf_order from response order after map.
+      stampPdfOrder(output.maintenance);
     }
 
     if (resultJson.spare_parts && Array.isArray(resultJson.spare_parts)) {
-      output.spare_parts = resultJson.spare_parts.map(item => {
+      output.spare_parts = resultJson.spare_parts.map((item, idx) => {
         let title = sanitizeVal(item.equipment_title);
         if (title === "NA") title = cleanDocName;
+        const pdfOrderRaw = parseInt(item.pdf_order, 10);
         return {
           id: 0,
           equipment_title: title,
@@ -2129,22 +2106,26 @@ function processRawModelResponse(rawResponseText, docName, pageNum, base64Image,
           recommended_stock_qty: sanitizeVal(item.recommended_stock_qty),
           warranty_period: sanitizeVal(item.warranty_period),
           frequency_of_use: sanitizeVal(item.frequency_of_use) === "NA" && item.periodic_use ? sanitizeVal(item.periodic_use) : sanitizeVal(item.frequency_of_use),
-          page: pageNum
+          page: pageNum,
+          // Preserve model order when provided; otherwise use response array order.
+          pdf_order: Number.isFinite(pdfOrderRaw) && pdfOrderRaw > 0 ? pdfOrderRaw : (idx + 1)
         };
       });
     }
 
     if (resultJson.troubleshooting && Array.isArray(resultJson.troubleshooting)) {
-      output.troubleshooting = resultJson.troubleshooting.map(item => {
+      output.troubleshooting = resultJson.troubleshooting.map((item, idx) => {
         let title = sanitizeVal(item.equipment_title);
         if (title === "NA") title = cleanDocName;
+        const pdfOrderRaw = parseInt(item.pdf_order, 10);
         return {
           id: 0,
           equipment_title: title,
           subsystem_component: sanitizeVal(item.subsystem_component),
           problem: sanitizeVal(item.problem),
           root_cause_solution: sanitizeVal(item.root_cause_solution),
-          page: pageNum
+          page: pageNum,
+          pdf_order: Number.isFinite(pdfOrderRaw) && pdfOrderRaw > 0 ? pdfOrderRaw : (idx + 1)
         };
       });
     }
@@ -2180,6 +2161,11 @@ function processRawModelResponse(rawResponseText, docName, pageNum, base64Image,
         });
       }
     }
+
+    // After filters, keep a dense within-page pdf_order for stable grid/export sorting.
+    stampPdfOrder(output.maintenance);
+    stampPdfOrder(output.spare_parts);
+    stampPdfOrder(output.troubleshooting);
 
     return normalizeExtraction(output);
   } catch (parseErr) {
@@ -2242,6 +2228,7 @@ async function runOllamaExtractor(text, docName, pageNum, base64Image = null) {
 // Uses the same prompt/parsing pipeline as Ollama, so extraction quality/fields stay identical
 // regardless of which engine is active — only the transport (REST call + auth) differs.
 async function runGeminiExtractor(text, docName, pageNum, base64Image = null, mimeType = "image/jpeg") {
+  refreshAdminTestGeminiKey();
   if (!isGeminiMode()) {
     throw new Error("Gemini extractor blocked: current engine mode is " + engineMode);
   }
@@ -2284,7 +2271,7 @@ async function runGeminiExtractor(text, docName, pageNum, base64Image = null, mi
       throw new Error(
         `Gemini model "${modelName}" returned 404 Not Found` +
         `${errDetail ? " - " + errDetail : ""}. ` +
-        `Pick a live model in Settings (Verify Key) — automatic fallback is disabled to avoid dual-model token waste.`
+        `Pick a live model in Settings — automatic fallback is disabled to avoid dual-model token waste.`
       );
     }
     throw new Error(`Gemini API error: ${response.status}${errDetail ? " - " + errDetail : ""}`);
@@ -2341,6 +2328,74 @@ function renderMarkdown(text) {
 /* -------------------------------------------------------------
  * 1. UI Rendering Engine
  * ------------------------------------------------------------- */
+
+/** True when a logbook cell holds real data, not a dash/nil placeholder. */
+function hasMeaningfulValue(val) {
+  const s = String(val || "").trim().toLowerCase();
+  return !!s && !["-", "--", "—", "nil", "n/a", "na", "none"].includes(s);
+}
+
+/**
+ * Parses the free-form dates found on scanned history cards.
+ * Day-first (dd/mm/yyyy) is assumed for numeric dates, which is the format
+ * used on field logbooks. Returns a timestamp or null.
+ */
+function parseLogbookDate(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const inRange = (t) => {
+    const y = new Date(t).getFullYear();
+    return y >= 1980 && y <= 2100 ? t : null;
+  };
+  // dd/mm/yyyy, dd-mm-yy, dd.mm.yyyy
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m) {
+    const d = Number(m[1]);
+    const mo = Number(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y += 2000;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return inRange(new Date(y, mo - 1, d).getTime());
+  }
+  // yyyy-mm-dd
+  m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
+  if (m) return inRange(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime());
+  // "12 May 2023", "May 2023", etc.
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : inRange(t);
+}
+
+/** Fills the Field History stat cards from the logbook rows. */
+function updateLogbookMetrics() {
+  const logPartsEl = document.getElementById("count-log-parts");
+  if (!logPartsEl) return;
+  const rows = maintenanceRegistry;
+
+  logPartsEl.innerText = rows.filter((r) => hasMeaningfulValue(r.parts_renewed)).length;
+
+  const techs = new Set();
+  rows.forEach((r) => {
+    if (hasMeaningfulValue(r.attended_by)) techs.add(String(r.attended_by).trim().toLowerCase());
+  });
+  const techsEl = document.getElementById("count-log-techs");
+  if (techsEl) techsEl.innerText = techs.size;
+
+  const remarksEl = document.getElementById("count-log-remarks");
+  if (remarksEl) remarksEl.innerText = rows.filter((r) => hasMeaningfulValue(r.remarks)).length;
+
+  let latest = null;
+  rows.forEach((r) => {
+    const t = parseLogbookDate(r.date);
+    if (t != null && (latest == null || t > latest)) latest = t;
+  });
+  const latestEl = document.getElementById("count-log-latest");
+  if (latestEl) {
+    latestEl.innerText = latest != null
+      ? new Date(latest).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+      : "—";
+  }
+}
+
 function updateDashboardMetrics() {
   const rules = maintenanceRegistry.length;
   const parts = sparePartsRegistry.length;
@@ -2370,6 +2425,95 @@ function updateDashboardMetrics() {
   countConsumables.innerText = consumables;
   countTime.innerText = timeBased;
   countTroubleshooting.innerText = troubleshootingRegistry.length;
+  if (countOverallScore) {
+    const score = lastExtractMeta && lastExtractMeta.overall_score;
+    if (score != null && score !== "") {
+      countOverallScore.innerText = `${Number(score).toFixed(1)}%`;
+    } else {
+      countOverallScore.innerText = "—";
+    }
+  }
+  updateQualityScoreCard();
+  updateLogbookMetrics();
+}
+
+/** Band for extraction quality: high (>80), mid (50–80), low (<50). */
+function getQualityScoreBand(score) {
+  if (score == null || score === "" || Number.isNaN(Number(score))) return null;
+  const n = Number(score);
+  if (n > 80) return "high";
+  if (n >= 50) return "mid";
+  return "low";
+}
+
+function updateQualityScoreCard() {
+  const card = document.getElementById("card-quality-score");
+  const icon = document.getElementById("quality-score-icon");
+  if (!card) return;
+
+  card.classList.remove("score-high", "score-mid", "score-low");
+  if (icon) {
+    icon.classList.remove("blue-glow", "green-glow", "amber-glow", "red-glow");
+  }
+
+  const score = lastExtractMeta && lastExtractMeta.overall_score;
+  const band = getQualityScoreBand(score);
+  if (!band) {
+    if (icon) icon.classList.add("blue-glow");
+    return;
+  }
+
+  card.classList.add(`score-${band}`);
+  if (icon) {
+    icon.classList.add(
+      band === "high" ? "green-glow" : band === "mid" ? "amber-glow" : "red-glow"
+    );
+  }
+}
+
+function openQualityScoreModal() {
+  const modal = document.getElementById("quality-score-modal");
+  const valueEl = document.getElementById("quality-score-value");
+  const levelEl = document.getElementById("quality-score-level");
+  const msgEl = document.getElementById("quality-score-message");
+  if (!modal || !valueEl || !levelEl || !msgEl) return;
+
+  const score = lastExtractMeta && lastExtractMeta.overall_score;
+  const band = getQualityScoreBand(score);
+  levelEl.classList.remove("score-high", "score-mid", "score-low");
+
+  if (band == null) {
+    valueEl.textContent = "—";
+    levelEl.textContent = "No score yet";
+    msgEl.textContent =
+      "Extraction quality appears after a document is processed. It reflects how complete and consistent the recovered records were for that run.";
+  } else {
+    const n = Number(score);
+    valueEl.textContent = `${n.toFixed(1)}%`;
+    if (band === "high") {
+      levelEl.textContent = "Good";
+      levelEl.classList.add("score-high");
+      msgEl.textContent =
+        "This run scored above 80%. The source document supported a solid extract. Review key rows before use — AI output can still miss or misread details.";
+    } else if (band === "mid") {
+      levelEl.textContent = "Fair";
+      levelEl.classList.add("score-mid");
+      msgEl.textContent =
+        "This run scored between 50% and 80%. Some records were recovered, but the source layout or page quality may have limited completeness. Review the table carefully, or try a clearer page range.";
+    } else {
+      levelEl.textContent = "Needs attention";
+      levelEl.classList.add("score-low");
+      msgEl.textContent =
+        "This run scored below 50%. The source file may be hard to parse (scanned pages, weak text, or dense layout), so few reliable records were recovered. Try a cleaner PDF, a smaller From/To range, or OCR for scanned pages, then extract again.";
+    }
+  }
+
+  modal.hidden = false;
+}
+
+function closeQualityScoreModal() {
+  const modal = document.getElementById("quality-score-modal");
+  if (modal) modal.hidden = true;
 }
 
 let renderGridDebounceTimer = null;
@@ -2407,6 +2551,59 @@ function scheduleRenderGrid(immediate = false) {
   }, RENDER_GRID_DEBOUNCE_MS);
 }
 
+function isMissingFieldValue(val) {
+  const s = String(val || "").trim().toLowerCase();
+  return !s || s === "na" || s === "n/a" || s === "null" || s === "undefined" || s === "-";
+}
+
+function matchesSparePartTypeFilter(row, filterKey) {
+  if (!filterKey || filterKey === "all") return true;
+  const cat = String(row.part_categorization || "").trim().toLowerCase();
+  const missing = isMissingFieldValue(cat);
+  if (filterKey === "unspecified") return missing;
+  if (missing) return false;
+  if (filterKey === "critical") return cat.includes("critical");
+  if (filterKey === "consumable") return cat.includes("consumable");
+  if (filterKey === "standard") return cat.includes("standard");
+  return true;
+}
+
+function resetFilterTabActive(container, attrName, value) {
+  if (!container) return;
+  container.querySelectorAll(".tab-btn").forEach((btn) => {
+    const isActive = (btn.getAttribute(attrName) || "all") === value;
+    btn.classList.toggle("active", isActive);
+  });
+}
+
+function syncRegistryFilterTabs() {
+  const showMaint =
+    activeRegistryTab === "maintenance" &&
+    !(typeof activeEquipmentCategory !== "undefined" && activeEquipmentCategory === "Logbook");
+  const showSpare = activeRegistryTab === "spare_parts";
+  const showTrouble = activeRegistryTab === "troubleshooting";
+
+  if (filterTabs) {
+    const chatFilterChip = document.getElementById("chat-filter-chip");
+    if (showMaint) {
+      filterTabs.style.display = "flex";
+      filterTabs.querySelectorAll("[data-filter]").forEach((btn) => {
+        btn.style.display = "block";
+      });
+    } else if (!showSpare && !showTrouble && (highlightRecordIds.length > 0 || chatFilterChip)) {
+      filterTabs.style.display = "flex";
+      filterTabs.querySelectorAll("[data-filter]").forEach((btn) => {
+        btn.style.display = "none";
+      });
+    } else {
+      filterTabs.style.display = "none";
+    }
+  }
+  if (spareFilterTabs) {
+    spareFilterTabs.style.display = showSpare ? "flex" : "none";
+  }
+}
+
 function renderGrid() {
   let filtered = [];
 
@@ -2439,6 +2636,7 @@ function renderGrid() {
       
       return true;
     });
+    filteredMaintenance = filterByConfidence(filteredMaintenance);
     filtered = filteredMaintenance;
 
     if (filtered.length === 0) {
@@ -2450,6 +2648,7 @@ function renderGrid() {
         filtered.forEach(row => {
           const tr = document.createElement("tr");
           tr.setAttribute("data-id", row.id);
+          if (isLowConfidenceRow(row)) tr.classList.add("row-low-confidence");
           
           tr.innerHTML = `
             <td class="page-cell" style="font-weight: 600;">#${row.id}</td>
@@ -2458,6 +2657,7 @@ function renderGrid() {
             <td class="editable" data-col="parts_renewed" style="font-weight: 500; font-family: monospace;">${escapeHTML(row.parts_renewed || "NA")}</td>
             <td class="editable" data-col="attended_by">${escapeHTML(row.attended_by || "NA")}</td>
             <td class="editable" data-col="remarks" style="white-space: normal;">${escapeHTML(row.remarks || "NA")}</td>
+            <td class="confidence-cell" title="Extraction confidence">${formatConfidenceCell(row)}</td>
             <td class="page-cell editable" data-col="page" style="text-align: center;">Page ${row.page || "NA"}</td>
             <td class="row-actions">
               <button class="row-btn btn-delete" title="Delete record"><i data-lucide="trash-2"></i></button>
@@ -2469,6 +2669,7 @@ function renderGrid() {
         filtered.forEach(row => {
           const tr = document.createElement("tr");
           tr.setAttribute("data-id", row.id);
+          if (isLowConfidenceRow(row)) tr.classList.add("row-low-confidence");
           
           let tagClass = "tag-days";
           const routine = String(row.maintenance_routine || "").toLowerCase();
@@ -2482,6 +2683,7 @@ function renderGrid() {
             <td class="editable" data-col="subsystem_component" style="font-weight: 500;">${escapeHTML(row.subsystem_component || "NA")}</td>
             <td class="editable" data-col="maintenance_routine"><span class="freq-tag ${tagClass}">${escapeHTML(row.maintenance_routine || "NA")}</span></td>
             <td class="editable" data-col="checks_instructions" style="white-space: normal; max-width: 350px;">${escapeHTML(row.checks_instructions || "NA")}</td>
+            <td class="confidence-cell" title="Extraction confidence">${formatConfidenceCell(row)}</td>
             <td class="page-cell editable" data-col="page" style="text-align: center;">Page ${row.page || "NA"}</td>
             <td class="row-actions">
               <button class="row-btn btn-delete" title="Delete record"><i data-lucide="trash-2"></i></button>
@@ -2496,20 +2698,24 @@ function renderGrid() {
     sparePartsTableBody.innerHTML = "";
     
     filteredSpareParts = sparePartsRegistry.filter(row => {
-      // 1. Search Text Query
+      // 1. Part-type filter tabs
+      if (!matchesSparePartTypeFilter(row, currentSpareFilter)) return false;
+
+      // 2. Search Text Query
       if (currentSearchQuery) {
         const q = currentSearchQuery.toLowerCase();
         const matchText = `${row.equipment_title} ${row.subsystem_location} ${row.item_no} ${row.part_name} ${row.part_number_code} ${row.drawing_model_no} ${row.oem_standard_body} ${row.part_categorization} ${row.quantity} ${row.frequency_of_use}`.toLowerCase();
         if (!matchText.includes(q)) return false;
       }
 
-      // 2. Cognitive Chat Highlight Filter
+      // 3. Cognitive Chat Highlight Filter
       if (highlightRecordIds.length > 0) {
         if (!highlightRecordIds.includes(row.id)) return false;
       }
       
       return true;
     });
+    filteredSpareParts = filterByConfidence(filteredSpareParts);
     filtered = filteredSpareParts;
 
     if (filtered.length === 0) {
@@ -2520,6 +2726,7 @@ function renderGrid() {
       filtered.forEach(row => {
         const tr = document.createElement("tr");
         tr.setAttribute("data-id", row.id);
+        if (isLowConfidenceRow(row)) tr.classList.add("row-low-confidence");
 
         tr.innerHTML = `
           <td class="page-cell" style="font-weight: 600;">#${row.id}</td>
@@ -2535,6 +2742,7 @@ function renderGrid() {
           <td class="editable" data-col="recommended_stock_qty" style="font-weight: 600; text-align: center; color: var(--accent-green);">${escapeHTML(row.recommended_stock_qty || "NA")}</td>
           <td class="editable" data-col="warranty_period">${escapeHTML(row.warranty_period || "NA")}</td>
           <td class="editable" data-col="frequency_of_use" style="text-align: center;">${escapeHTML(row.frequency_of_use || "NA")}</td>
+          <td class="confidence-cell" title="Extraction confidence">${formatConfidenceCell(row)}</td>
           <td class="page-cell editable" data-col="page" style="text-align: center;">Page ${row.page || "NA"}</td>
           <td class="row-actions">
             <button class="row-btn btn-delete" title="Delete record"><i data-lucide="trash-2"></i></button>
@@ -2562,6 +2770,7 @@ function renderGrid() {
       
       return true;
     });
+    filteredTroubleshooting = filterByConfidence(filteredTroubleshooting);
     filtered = filteredTroubleshooting;
 
     if (filtered.length === 0) {
@@ -2572,6 +2781,7 @@ function renderGrid() {
       filtered.forEach(row => {
         const tr = document.createElement("tr");
         tr.setAttribute("data-id", row.id);
+        if (isLowConfidenceRow(row)) tr.classList.add("row-low-confidence");
 
         tr.innerHTML = `
           <td class="page-cell" style="font-weight: 600;">#${row.id}</td>
@@ -2579,6 +2789,7 @@ function renderGrid() {
           <td class="editable" data-col="subsystem_component" style="font-weight: 500;">${escapeHTML(row.subsystem_component || "NA")}</td>
           <td class="editable" data-col="problem" style="color: var(--accent-amber); font-weight: 500; white-space: normal;">${escapeHTML(row.problem || "NA")}</td>
           <td class="editable" data-col="root_cause_solution" style="white-space: normal;">${escapeHTML(row.root_cause_solution || "NA")}</td>
+          <td class="confidence-cell" title="Extraction confidence">${formatConfidenceCell(row)}</td>
           <td class="page-cell editable" data-col="page" style="text-align: center;">Page ${row.page || "NA"}</td>
           <td class="row-actions">
             <button class="row-btn btn-delete" title="Delete record"><i data-lucide="trash-2"></i></button>
@@ -2589,28 +2800,12 @@ function renderGrid() {
     }
   }
 
-  // Handle visibility of filter tab container and individual buttons
+  // Handle visibility of filter tab containers
   const chatFilterChip = document.getElementById("chat-filter-chip");
   if (highlightRecordIds.length === 0 && chatFilterChip) {
     chatFilterChip.remove();
   }
-
-  if (filterTabs) {
-    const intervalButtons = filterTabs.querySelectorAll("[data-filter]");
-    const activeChatFilterChip = document.getElementById("chat-filter-chip");
-
-    if (activeRegistryTab === "maintenance") {
-      filterTabs.style.display = "flex";
-      intervalButtons.forEach(btn => btn.style.display = "block");
-    } else {
-      intervalButtons.forEach(btn => btn.style.display = "none");
-      if (highlightRecordIds.length > 0 || activeChatFilterChip) {
-        filterTabs.style.display = "flex";
-      } else {
-        filterTabs.style.display = "none";
-      }
-    }
-  }
+  syncRegistryFilterTabs();
   
   safeCreateIcons();
   attachTableListeners();
@@ -2699,7 +2894,8 @@ function attachTableListeners() {
   // Delete row button click
   const deleteBtns = document.querySelectorAll(".data-table .btn-delete");
   deleteBtns.forEach(btn => {
-    btn.addEventListener("click", function() {
+    btn.addEventListener("click", function(e) {
+      e.stopPropagation();
       const tr = this.closest("tr");
       const id = parseInt(tr.getAttribute("data-id"));
       if (activeRegistryTab === "maintenance") {
@@ -2709,13 +2905,32 @@ function attachTableListeners() {
       } else if (activeRegistryTab === "troubleshooting") {
         troubleshootingRegistry = troubleshootingRegistry.filter(r => r.id !== id);
       }
+      if (selectedRegistryRowId === id) clearSelectedRegistryRow();
       renderGrid();
     });
   });
+
+  // Single-click selects a row for "Ask Copilot about this row"
+  document.querySelectorAll(".data-table tbody tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", function(e) {
+      if (e.target.closest(".btn-delete") || e.target.closest("td.editing") || e.target.closest("input")) return;
+      const id = parseInt(this.getAttribute("data-id"), 10);
+      if (!Number.isFinite(id)) return;
+      selectRegistryRow(id, this);
+    });
+  });
+
+  if (selectedRegistryRowId != null) {
+    const selectedTr = document.querySelector(`.data-table tr[data-id="${selectedRegistryRowId}"]`);
+    if (selectedTr) selectedTr.classList.add("row-selected");
+    else clearSelectedRegistryRow();
+  }
+  updateAskSelectedBar();
 }
 
 // Add Custom Record
-addRowBtn.addEventListener("click", () => {
+if (addRowBtn) {
+  addRowBtn.addEventListener("click", () => {
   let newId;
   if (activeRegistryTab === "maintenance") {
     newId = maintenanceRegistry.length > 0 ? Math.max(...maintenanceRegistry.map(r => r.id)) + 1 : 1;
@@ -2781,26 +2996,50 @@ addRowBtn.addEventListener("click", () => {
       firstCell.dispatchEvent(event);
     }
   }, 50);
-});
+  });
+}
 
 // Search grid bar
-gridSearch.addEventListener("input", (e) => {
-  currentSearchQuery = e.target.value;
-  highlightRecordIds = []; // clear AI search highlights when manual filtering
-  renderGrid();
-});
+if (gridSearch) {
+  gridSearch.addEventListener("input", (e) => {
+    currentSearchQuery = e.target.value;
+    highlightRecordIds = []; // clear AI search highlights when manual filtering
+    renderGrid();
+  });
+}
+if (confidenceFilter) {
+  confidenceFilter.addEventListener("change", (e) => {
+    handleConfidenceFilterChange(e.target.value);
+  });
+}
 
-// Filter Tabs (only applicable to Maintenance interval filtering)
-filterTabs.addEventListener("click", (e) => {
-  const tab = e.target.closest(".tab-btn");
-  if (!tab) return;
-  
-  document.querySelectorAll(".tab-btn").forEach(btn => btn.classList.remove("active"));
-  tab.classList.add("active");
-  currentTabFilter = tab.getAttribute("data-filter");
-  highlightRecordIds = []; // clear AI highlights
-  renderGrid();
-});
+// Filter Tabs — Maintenance intervals
+if (filterTabs) {
+  filterTabs.addEventListener("click", (e) => {
+    const tab = e.target.closest(".tab-btn");
+    if (!tab) return;
+
+    filterTabs.querySelectorAll(".tab-btn").forEach((btn) => btn.classList.remove("active"));
+    tab.classList.add("active");
+    currentTabFilter = tab.getAttribute("data-filter") || "all";
+    highlightRecordIds = []; // clear AI highlights
+    renderGrid();
+  });
+}
+
+// Filter Tabs — Spare part types
+if (spareFilterTabs) {
+  spareFilterTabs.addEventListener("click", (e) => {
+    const tab = e.target.closest(".tab-btn");
+    if (!tab) return;
+
+    spareFilterTabs.querySelectorAll(".tab-btn").forEach((btn) => btn.classList.remove("active"));
+    tab.classList.add("active");
+    currentSpareFilter = tab.getAttribute("data-spare-filter") || "all";
+    highlightRecordIds = [];
+    renderGrid();
+  });
+}
 
 /* -------------------------------------------------------------
  * 3. SheetJS High-Fidelity Excel Export (3 sheets in one workbook)
@@ -2817,43 +3056,56 @@ function sanitizeExportBaseName(filename) {
   return cleaned || "document";
 }
 
+function orderRowsForExport(rows) {
+  return [...rows]
+    .map((row, idx) => ({ row, idx }))
+    .sort((a, b) => comparePdfRowOrder(a.row, b.row, a.idx, b.idx))
+    .map(d => d.row);
+}
+
 function buildMaintenanceExportRows(rows) {
+  const ordered = orderRowsForExport(rows);
   if (activeEquipmentCategory === "Logbook") {
     return {
-      data: rows.map(r => ({
-        "Record ID": `#${r.id}`,
+      data: ordered.map((r, idx) => ({
+        "Record ID": `#${idx + 1}`,
         "Date": r.date || "NA",
         "Maintenance Work Description": r.maintenance_work_description || "NA",
         "Parts Renewed": r.parts_renewed || "NA",
         "Attended By": r.attended_by || "NA",
         "Remarks": r.remarks || "NA",
+        "Confidence": formatConfidenceCell(r),
         "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
       })),
       cols: [
         { wch: 10 }, { wch: 15 }, { wch: 45 }, { wch: 25 },
-        { wch: 20 }, { wch: 45 }, { wch: 15 }
+        { wch: 20 }, { wch: 45 }, { wch: 12 }, { wch: 15 }
       ]
     };
   }
   return {
-    data: rows.map(r => ({
-      "Record ID": `#${r.id}`,
+    data: ordered.map((r, idx) => ({
+      "Record ID": `#${idx + 1}`,
       "Equipment Title": r.equipment_title || "NA",
       "Sub-system / Component": r.subsystem_component || "NA",
       "Maintenance Routine / Interval": r.maintenance_routine || "NA",
       "Required Maintenance Checks / Instructions": r.checks_instructions || "NA",
+      "Confidence": formatConfidenceCell(r),
       "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
     })),
     cols: [
-      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 25 }, { wch: 65 }, { wch: 15 }
+      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 25 }, { wch: 65 }, { wch: 12 }, { wch: 15 }
     ]
   };
 }
 
 function buildSparePartsExportRows(rows) {
+  // Final safety: export in PDF order even if registry was edited/unsorted.
+  const ordered = orderRowsForExport(rows);
   return {
-    data: rows.map(r => ({
-      "Record ID": `#${r.id}`,
+    data: ordered.map((r, idx) => ({
+      "Record ID": `#${idx + 1}`,
+      "PDF Sequence": idx + 1,
       "Equipment Title": r.equipment_title || "NA",
       "Sub-system / Component Location": r.subsystem_location || "NA",
       "Item No.": r.item_no || "NA",
@@ -2866,28 +3118,31 @@ function buildSparePartsExportRows(rows) {
       "Recommended Stock QTY": r.recommended_stock_qty || "NA",
       "Warranty Period": r.warranty_period || "NA",
       "Frequency of Use": r.frequency_of_use || "NA",
+      "Confidence": formatConfidenceCell(r),
       "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
     })),
     cols: [
-      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 28 },
+      { wch: 10 }, { wch: 12 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 28 },
       { wch: 25 }, { wch: 22 }, { wch: 20 }, { wch: 20 }, { wch: 12 },
-      { wch: 15 }, { wch: 15 }, { wch: 22 }, { wch: 15 }
+      { wch: 15 }, { wch: 15 }, { wch: 22 }, { wch: 12 }, { wch: 15 }
     ]
   };
 }
 
 function buildTroubleshootingExportRows(rows) {
+  const ordered = orderRowsForExport(rows);
   return {
-    data: rows.map(r => ({
-      "Record ID": `#${r.id}`,
+    data: ordered.map((r, idx) => ({
+      "Record ID": `#${idx + 1}`,
       "Equipment Title": r.equipment_title || "NA",
       "Sub-system / Component": r.subsystem_component || "NA",
       "Problem / Symptom": r.problem || "NA",
       "Root Cause / Solution": r.root_cause_solution || "NA",
+      "Confidence": formatConfidenceCell(r),
       "Source Page Reference": r.page === "NA" || r.page == null ? "NA" : `Page ${r.page}`
     })),
     cols: [
-      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 35 }, { wch: 65 }, { wch: 15 }
+      { wch: 10 }, { wch: 22 }, { wch: 28 }, { wch: 35 }, { wch: 65 }, { wch: 12 }, { wch: 15 }
     ]
   };
 }
@@ -2908,10 +3163,16 @@ function appendSheetOrEmpty(wb, sheetName, built) {
 
 function buildCombinedWorkbook({ useFiltered = false } = {}) {
   const maintRows = useFiltered ? filteredMaintenance : maintenanceRegistry;
-  const partsRows = useFiltered ? filteredSpareParts : sparePartsRegistry;
-  const troubleRows = useFiltered ? filteredTroubleshooting : troubleshootingRegistry;
 
   const wb = XLSX.utils.book_new();
+  if (activeEquipmentCategory === "Logbook") {
+    // Field history only produces logbook records — one sheet, no empty extras.
+    appendSheetOrEmpty(wb, "Field History", buildMaintenanceExportRows(maintRows));
+    return wb;
+  }
+
+  const partsRows = useFiltered ? filteredSpareParts : sparePartsRegistry;
+  const troubleRows = useFiltered ? filteredTroubleshooting : troubleshootingRegistry;
   appendSheetOrEmpty(wb, "Maintenance Tasks", buildMaintenanceExportRows(maintRows));
   appendSheetOrEmpty(wb, "Spare Parts", buildSparePartsExportRows(partsRows));
   appendSheetOrEmpty(wb, "Troubleshooting", buildTroubleshootingExportRows(troubleRows));
@@ -2938,15 +3199,19 @@ function exportCombinedWorkbook(sourceFileName, { ask = false, useFiltered = fal
     return false;
   }
 
+  const isLogbook = activeEquipmentCategory === "Logbook";
   const filename = getExportFileName(sourceFileName);
   if (ask) {
+    const sheetsInfo = isLogbook
+      ? `One workbook with 1 sheet:\n• Field History`
+      : `One workbook with 3 sheets:\n` +
+        `• Maintenance Tasks\n` +
+        `• Spare Parts\n` +
+        `• Troubleshooting`;
     const ok = confirm(
       `Save extraction results to your computer?\n\n` +
       `Excel file: ${filename}\n\n` +
-      `One workbook with 3 sheets:\n` +
-      `• Maintenance Tasks\n` +
-      `• Spare Parts\n` +
-      `• Troubleshooting\n\n` +
+      `${sheetsInfo}\n\n` +
       `Using the uploaded document name avoids mixed/duplicate generic Excel names.`
     );
     if (!ok) return false;
@@ -2955,7 +3220,9 @@ function exportCombinedWorkbook(sourceFileName, { ask = false, useFiltered = fal
   const wb = buildCombinedWorkbook({ useFiltered });
   XLSX.writeFile(wb, filename);
   appendChatSystemMessage(
-    `Saved Excel workbook **${filename}** with **Maintenance**, **Spare Parts**, and **Troubleshooting** sheets.`
+    isLogbook
+      ? `Saved Excel workbook **${filename}** with the **Field History** sheet.`
+      : `Saved Excel workbook **${filename}** with **Maintenance**, **Spare Parts**, and **Troubleshooting** sheets.`
   );
   return true;
 }
@@ -2970,7 +3237,7 @@ function offerSaveExcelAfterExtraction(fileOrName) {
 
 if (exportBtn) {
   exportBtn.addEventListener("click", () => {
-    // Manual export: always all 3 sheets, named after the loaded document.
+    // Manual export: full workbook (1 sheet for Field History, 3 for manuals).
     exportCombinedWorkbook(lastSourceDocName || "OmniParse_Export", {
       ask: false,
       useFiltered: false
@@ -2982,46 +3249,73 @@ if (exportBtn) {
  * ------------------------------------------------------------- */
 
 // Drop zone hover drag indicators
-['dragenter', 'dragover'].forEach(eventName => {
-  dropZone.addEventListener(eventName, (e) => {
-    e.preventDefault();
-    dropZone.classList.add('dragover');
-  }, false);
-});
-
-['dragleave', 'drop'].forEach(eventName => {
-  dropZone.addEventListener(eventName, (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-  }, false);
-});
-
-// Drop handler
-dropZone.addEventListener('drop', (e) => {
-  const dt = e.dataTransfer;
-  const files = dt.files;
-  if (files && files.length > 0) {
-    handleFileUpload(files[0]);
+function openFilePicker() {
+  if (!fileInput) return;
+  if (isExtracting) {
+    alert("An extraction is already in progress. Please wait for it to finish or cancel it first.");
+    return;
   }
-});
-
-browseBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  fileInput.click();
-});
-
-// Clicking anywhere on the drop zone (not just the "browse files" link) opens the file picker
-dropZone.addEventListener('click', (e) => {
-  if (isExtracting || e.target.closest('#progress-overlay')) return;
-  fileInput.click();
-});
-
-fileInput.addEventListener('change', (e) => {
-  if (e.target.files.length > 0) {
-    handleFileUpload(e.target.files[0]);
+  try {
+    fileInput.value = "";
+    fileInput.click();
+  } catch (err) {
+    console.error("Could not open file picker", err);
+    alert("Could not open the file picker. Try drag-and-drop, or refresh the page.");
   }
-});
+}
 
+if (dropZone && fileInput) {
+  ['dragenter', 'dragover'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    }, false);
+  });
+
+  ['dragleave', 'drop'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+    }, false);
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer;
+    const files = dt.files;
+    if (files && files.length > 0) {
+      handleFileUpload(files[0]);
+    }
+  });
+
+  // Click card to browse (skip page-range controls and native browse label)
+  dropZone.addEventListener('click', (e) => {
+    if (isExtracting || e.target.closest('#progress-overlay')) return;
+    if (e.target.closest('#page-range-row')) return;
+    if (e.target.closest('#browse-btn') || e.target.closest('label[for="file-input"]')) return;
+    openFilePicker();
+  });
+}
+
+// Native <label for="file-input"> already opens the picker; keep a JS fallback too
+if (browseBtn && fileInput) {
+  browseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // label[for] handles the picker natively; only force-click if needed
+    if (browseBtn.tagName !== "LABEL") {
+      e.preventDefault();
+      openFilePicker();
+    }
+  });
+}
+
+if (fileInput) {
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleFileUpload(e.target.files[0]);
+      e.target.value = "";
+    }
+  });
+}
 
 
 const MAX_UPLOAD_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB, matches UI copy
@@ -3030,6 +3324,14 @@ async function handleFileUpload(file) {
   if (isExtracting) {
     alert("An extraction is already in progress. Please wait for it to finish or cancel it first.");
     return;
+  }
+
+  if (typeof window.requireAuthForApi === "function") {
+    try {
+      window.requireAuthForApi();
+    } catch (e) {
+      return;
+    }
   }
 
   const extension = file.name.split('.').pop().toLowerCase();
@@ -3056,25 +3358,19 @@ async function handleFileUpload(file) {
   lastSourceDocName = file.name;
   renderGrid();
 
-  // Claim the extraction lock immediately so a second file dropped during the
-  // async FileReader setup below can't sneak in before the sub-parsers set it themselves
-  isExtracting = true;
+  // Show processing UI immediately (lock + overlay + compact upload card)
+  setActiveDocBadge(file.name);
+  setExtractingUi(true, `Processing "${file.name}"`, "Checking Python API...");
 
-  // Active parser overlay animations
-  progressOverlay.classList.add("active");
-  progressFill.style.width = "0%";
-  progressTitle.innerText = `Processing "${file.name}"`;
-  progressStatus.innerText = "Checking Python API...";
-
+  let extractFinishedCleanly = false;
   try {
     // Prefer FastAPI for Gemini/Ollama PDF/TXT/image work; keep browser path otherwise.
     if (canUsePythonApiForFile(file, extension)) {
-      progressStatus.innerText = "Checking Python API (5s timeout)...";
+      if (progressStatus) progressStatus.innerText = "Checking Python API (5s timeout)...";
       const apiHealth = await checkPythonApiHealth();
       if (apiHealth.ok) {
         if (apiHealth.busy) {
-          progressOverlay.classList.remove("active");
-          isExtracting = false;
+          setActiveDocBadge("");
           alert(
             "API is already busy with another extraction.\n\n" +
             "In the API terminal press Ctrl+C, then run ./start-api.sh again.\n" +
@@ -3084,12 +3380,11 @@ async function handleFileUpload(file) {
         }
 
         let pageCountHint = null;
-        const range = getConfiguredPageRange();
 
         if (extension === "pdf") {
           // Page count helps the timeout estimate; skip if it takes too long on huge files.
           try {
-            progressStatus.innerText = "Counting PDF pages (can take a minute on large manuals)...";
+            if (progressStatus) progressStatus.innerText = "Counting PDF pages (can take a minute on large manuals)...";
             pageCountHint = await Promise.race([
               countPdfPages(file),
               new Promise((_, reject) => setTimeout(() => reject(new Error("page-count-timeout")), 90000))
@@ -3100,15 +3395,15 @@ async function handleFileUpload(file) {
           }
           const okLarge = await confirmLargePdfIfNeeded(pageCountHint, file.size);
           if (!okLarge) {
-            progressOverlay.classList.remove("active");
-            isExtracting = false;
+            setActiveDocBadge("");
             appendChatSystemMessage("Extraction cancelled.");
             return;
           }
         }
-        progressStatus.innerText = "Python API online — full-document extract started. Keep this tab open...";
+        if (progressStatus) progressStatus.innerText = "Python API online — extract started. Keep this tab open...";
         const result = await extractViaPythonApi(file, pageCountHint);
         applyApiExtractResult(result, file);
+        extractFinishedCleanly = true;
         return;
       }
       appendChatSystemMessage(
@@ -3121,7 +3416,7 @@ async function handleFileUpload(file) {
       appendChatSystemMessage("ℹ️ Word documents use the in-browser Mammoth extractor.");
     }
 
-    progressStatus.innerText = "Initializing file reader (browser fallback)...";
+    if (progressStatus) progressStatus.innerText = "Initializing file reader (browser fallback)...";
 
     if (extension === 'pdf') {
       await extractPDFText(file);
@@ -3132,11 +3427,25 @@ async function handleFileUpload(file) {
     } else {
       await extractImageText(file);
     }
+    extractFinishedCleanly = true;
   } catch (error) {
     console.error(error);
-    alert(`Error parsing document: ${error.message}`);
-    progressOverlay.classList.remove("active");
-    isExtracting = false;
+    const msg = String(error && error.message ? error.message : error);
+    if (/gemini api key required/i.test(msg)) {
+      alert(
+        "Upload failed: Gemini API key required.\n\n" +
+        "Set GEMINI_API_KEY in backend/.env and restart ./start-api.sh."
+      );
+    } else {
+      alert(`Error parsing document: ${msg}`);
+    }
+    setActiveDocBadge("");
+  } finally {
+    // API path clears UI inside applyApiExtractResult; browser parsers clear themselves.
+    // Always unlock if something returned early or threw before those paths ran.
+    if (!extractFinishedCleanly && isExtracting) {
+      clearExtractingUi();
+    }
   }
 }
 
@@ -3300,17 +3609,13 @@ function extractTXTText(file) {
         progressStatus.innerText = `Complete!`;
         
         setTimeout(() => {
-          progressOverlay.classList.remove("active");
-          activeDocName.innerHTML = `<i data-lucide="file-text"></i><span>${escapeHTML(file.name)}</span>`;
-          activeDocName.style.borderColor = "var(--accent-cyan-glow)";
-          activeDocName.style.color = "var(--accent-cyan)";
-          activeDocName.style.background = "hsla(190, 90%, 50%, 0.05)";
-          safeCreateIcons();
+          clearExtractingUi();
+          setActiveDocBadge(file.name);
           
           const labelModeText = engineMode === "ollama" ? `local LLM (${ollamaModel}) processing ${llmChunksProcessed} / ${totalChunksCount} chunks` : engineMode === "gemini" ? `Gemini API (${geminiModel}) processing ${llmChunksProcessed} / ${totalChunksCount} chunks` : "heuristics";
           appendChatSystemMessage(`Successfully parsed text manual **"${file.name}"** using **${labelModeText}**! Extracted **${maintCount}** tasks, **${sparesCount}** spare parts, and **${troubleCount}** troubleshooting issues into the registries.`);
+          preferTabWithResults();
           renderGrid();
-          isExtracting = false;
           offerSaveExcelAfterExtraction(file);
           resolve();
         }, 1000);
@@ -3329,14 +3634,14 @@ function extractTXTText(file) {
           fallbackResult.spare_parts.forEach((r, rIdx) => r.id = startingId + rIdx);
           sparePartsRegistry = [...sparePartsRegistry, ...fallbackResult.spare_parts];
         }
-        progressOverlay.classList.remove("active");
+        clearExtractingUi();
+        preferTabWithResults();
         renderGrid();
-        isExtracting = false;
         resolve();
       }
     };
     reader.onerror = () => {
-      isExtracting = false;
+      clearExtractingUi();
       reject(new Error("File reading failed."));
     };
     reader.readAsText(file);
@@ -3406,22 +3711,74 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 function pageOrderKey(row) {
-  const p = parseInt(row && row.page, 10);
-  return Number.isFinite(p) ? p : Number.MAX_SAFE_INTEGER;
+  const raw = row && row.page;
+  if (raw == null || raw === "" || raw === "NA") return Number.MAX_SAFE_INTEGER;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  const s = String(raw).trim();
+  // Accept "12", "Page 12", "p.12", etc.
+  const m = s.match(/(\d{1,5})/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n)) return n;
+  }
+  return Number.MAX_SAFE_INTEGER;
 }
 
-// Keep grid/export order sequential by page even when concurrent calls finish out of order.
+function itemNoOrderKey(row) {
+  const raw = row && row.item_no;
+  if (raw == null || raw === "" || raw === "NA") return Number.MAX_SAFE_INTEGER;
+  const m = String(raw).trim().match(/^(\d{1,6})\b/);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
+}
+
+function pdfOrderKey(row) {
+  const n = parseInt(row && row.pdf_order, 10);
+  return Number.isFinite(n) && n > 0 ? n : Number.MAX_SAFE_INTEGER;
+}
+
+/** Same-page order must match the PDF (top→bottom / Item No.), never A–Z by name. */
+function comparePdfRowOrder(a, b, aIdx, bIdx) {
+  const pa = pageOrderKey(a);
+  const pb = pageOrderKey(b);
+  if (pa !== pb) return pa - pb;
+
+  const oa = pdfOrderKey(a);
+  const ob = pdfOrderKey(b);
+  if (oa !== ob) return oa - ob;
+
+  const ia = itemNoOrderKey(a);
+  const ib = itemNoOrderKey(b);
+  if (ia !== ib) return ia - ib;
+
+  return aIdx - bIdx;
+}
+
+/** Stamp stable reading order from the array the model returned (1-based). */
+function stampPdfOrder(rows) {
+  if (!Array.isArray(rows)) return rows;
+  rows.forEach((row, idx) => {
+    if (!row || typeof row !== "object") return;
+    const existing = parseInt(row.pdf_order, 10);
+    if (!Number.isFinite(existing) || existing <= 0) {
+      row.pdf_order = idx + 1;
+    }
+  });
+  return rows;
+}
+
+// Keep grid/export order matching the PDF page reading order.
 function assembleRegistriesInPageOrder() {
   const sortAndReindex = (registry) => {
-    const sorted = [...registry].sort((a, b) => {
-      const pa = pageOrderKey(a);
-      const pb = pageOrderKey(b);
-      if (pa !== pb) return pa - pb;
-      // Stable tie-break for rows from the same page.
-      return String(a.part_name || a.maintenance_work_description || a.checks_instructions || a.problem || "")
-        .localeCompare(String(b.part_name || b.maintenance_work_description || b.checks_instructions || b.problem || ""));
+    const decorated = registry.map((row, idx) => ({ row, idx }));
+    decorated.sort((a, b) => comparePdfRowOrder(a.row, b.row, a.idx, b.idx));
+    const sorted = decorated.map(d => d.row);
+    // Keep pdf_order aligned with final visible/export sequence.
+    sorted.forEach((row, idx) => {
+      row.id = idx + 1;
+      row.pdf_order = idx + 1;
     });
-    sorted.forEach((row, idx) => { row.id = idx + 1; });
     return sorted;
   };
 
@@ -3623,12 +3980,8 @@ function extractPDFText(file) {
         progressStatus.innerText = `Extraction finished!`;
         
         setTimeout(() => {
-          progressOverlay.classList.remove("active");
-          activeDocName.innerHTML = `<i data-lucide="file-text"></i><span>${escapeHTML(file.name)}</span>`;
-          activeDocName.style.borderColor = "var(--accent-cyan-glow)";
-          activeDocName.style.color = "var(--accent-cyan)";
-          activeDocName.style.background = "hsla(190, 90%, 50%, 0.05)";
-          safeCreateIcons();
+          clearExtractingUi();
+          setActiveDocBadge(file.name);
           
           const pagesInRange = rangeEnd - rangeStart + 1;
           const labelModeText = engineMode === "ollama"
@@ -3643,14 +3996,14 @@ function extractPDFText(file) {
             appendChatSystemMessage(`⚠️ **Document Scan Warning**: No searchable text layers were detected in **"${file.name}"**. The PDF may be composed of scanned page images. Please ensure the manual has selectable text or try converting it to a plain text (.txt) file.`);
           }
           
+          preferTabWithResults();
           renderGrid();
-          isExtracting = false;
           offerSaveExcelAfterExtraction(file);
           resolve();
         }, 400);
 
       } catch (err) {
-        isExtracting = false;
+        clearExtractingUi();
         reject(err);
       }
     };
@@ -3711,23 +4064,19 @@ async function extractImageText(file) {
         progressStatus.innerText = `Extraction finished!`;
         
         setTimeout(() => {
-          progressOverlay.classList.remove("active");
-          activeDocName.innerHTML = `<i data-lucide="file-text"></i><span>${escapeHTML(file.name)}</span>`;
-          activeDocName.style.borderColor = "var(--accent-cyan-glow)";
-          activeDocName.style.color = "var(--accent-cyan)";
-          activeDocName.style.background = "hsla(190, 90%, 50%, 0.05)";
-          safeCreateIcons();
+          clearExtractingUi();
+          setActiveDocBadge(file.name);
           
           appendChatSystemMessage(`Completed client-side image processing for **"${file.name}"** using **${engineLabel}**. Extracted **${maintCount}** tasks, **${sparesCount}** spare parts, and **${troubleCount}** troubleshooting issues into the registries.`);
           
+          preferTabWithResults();
           renderGrid();
-          isExtracting = false;
           offerSaveExcelAfterExtraction(file);
           resolve();
         }, 1200);
 
       } catch (err) {
-        isExtracting = false;
+        clearExtractingUi();
         reject(err);
       }
     };
@@ -4149,7 +4498,7 @@ async function callLLMRagAnswer(ragPrompt) {
         throw new Error(
           `Gemini model "${modelName}" returned 404 Not Found` +
           `${errDetail ? " - " + errDetail : ""}. ` +
-          `Pick a live model in Settings (Verify Key) — automatic fallback is disabled.`
+          `Pick a live model in Settings — automatic fallback is disabled.`
         );
       }
       throw new Error(`Gemini API returned HTTP ${response.status}${errDetail ? " - " + errDetail : ""}`);
@@ -4188,94 +4537,424 @@ async function callLLMRagAnswer(ragPrompt) {
   return data.response.trim();
 }
 
+const COPILOT_LLM_DAILY_LIMIT = 5;
+const COPILOT_LLM_QUOTA_KEY = "omniparse_copilot_llm_quota_v1";
+
+function todayKeyUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function readCopilotLlmQuota() {
+  try {
+    const raw = localStorage.getItem(COPILOT_LLM_QUOTA_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || parsed.date !== todayKeyUTC()) {
+      return { date: todayKeyUTC(), used: 0 };
+    }
+    return { date: parsed.date, used: Number(parsed.used) || 0 };
+  } catch (e) {
+    return { date: todayKeyUTC(), used: 0 };
+  }
+}
+
+function remainingCopilotLlmQuota() {
+  return Math.max(0, COPILOT_LLM_DAILY_LIMIT - readCopilotLlmQuota().used);
+}
+
+function consumeCopilotLlmQuota() {
+  const q = readCopilotLlmQuota();
+  if (q.used >= COPILOT_LLM_DAILY_LIMIT) return false;
+  q.used += 1;
+  q.date = todayKeyUTC();
+  try {
+    localStorage.setItem(COPILOT_LLM_QUOTA_KEY, JSON.stringify(q));
+  } catch (e) {}
+  updateCopilotQuotaBadge();
+  return true;
+}
+
+function refundCopilotLlmQuota() {
+  try {
+    const q = readCopilotLlmQuota();
+    q.used = Math.max(0, (Number(q.used) || 1) - 1);
+    q.date = todayKeyUTC();
+    localStorage.setItem(COPILOT_LLM_QUOTA_KEY, JSON.stringify(q));
+  } catch (e) {}
+  updateCopilotQuotaBadge();
+}
+
+function updateCopilotQuotaBadge() {
+  const badge = document.getElementById("copilot-quota-badge");
+  if (!badge) return;
+  const left = remainingCopilotLlmQuota();
+  badge.textContent = left > 0 ? `AI ${left}/${COPILOT_LLM_DAILY_LIMIT} left` : `AI limit reached`;
+  badge.classList.toggle("quota-exhausted", left <= 0);
+  badge.title = left > 0
+    ? `Copilot answers use API tokens. ${left} of ${COPILOT_LLM_DAILY_LIMIT} remaining today (per browser user).`
+    : `Daily Copilot AI limit (${COPILOT_LLM_DAILY_LIMIT}) reached. Try again tomorrow.`;
+}
+
+function isTimeBasedRoutine(routine) {
+  const s = String(routine || "").toLowerCase();
+  return s.includes("hour") || s.includes("month") || s.includes("week") ||
+    s.includes("year") || s.includes("day") || s.includes("shift") ||
+    s.includes("daily") || s.includes("weekly") || s.includes("monthly") ||
+    s.includes("yearly") || s.includes("annual") || /\b\d+\s*h\b/.test(s);
+}
+
+function isConsumablePart(row) {
+  const name = String(row.part_name || "").toLowerCase();
+  const cat = String(row.part_categorization || "").toLowerCase();
+  return name.includes("oil") || name.includes("grease") || name.includes("filter") ||
+    name.includes("seal") || name.includes("gasket") || cat.includes("consumable");
+}
+
+function resolveCopilotIntent(q) {
+  const intents = [];
+  if (/\btime[-\s]?based\b/.test(q) || /\b(interval|schedule|periodic|preventive)\b/.test(q) ||
+      (/\btasks?\b/.test(q) && /\b(time|interval|schedule|hour|day|month|year)\b/.test(q))) {
+    intents.push({
+      id: "time_based",
+      label: "Time-based Tasks",
+      type: "maintenance",
+      filter: (row) => isTimeBasedRoutine(row.maintenance_routine)
+    });
+  }
+  if (/\b(hour|hourly|hrs?)\b/.test(q)) {
+    intents.push({
+      id: "hours",
+      label: "Hourly tasks",
+      type: "maintenance",
+      filter: (row) => String(row.maintenance_routine || "").toLowerCase().includes("hour")
+    });
+  }
+  if (/\b(month|monthly)\b/.test(q)) {
+    intents.push({
+      id: "months",
+      label: "Monthly tasks",
+      type: "maintenance",
+      filter: (row) => String(row.maintenance_routine || "").toLowerCase().includes("month")
+    });
+  }
+  if (/\b(year|yearly|annual)\b/.test(q)) {
+    intents.push({
+      id: "years",
+      label: "Yearly tasks",
+      type: "maintenance",
+      filter: (row) => String(row.maintenance_routine || "").toLowerCase().includes("year")
+    });
+  }
+  if (/\b(day|daily|shift)\b/.test(q)) {
+    intents.push({
+      id: "days",
+      label: "Daily / shift tasks",
+      type: "maintenance",
+      filter: (row) => {
+        const s = String(row.maintenance_routine || "").toLowerCase();
+        return s.includes("day") || s.includes("daily") || s.includes("shift");
+      }
+    });
+  }
+  if (/\bconsumables?\b/.test(q)) {
+    intents.push({
+      id: "consumables",
+      label: "Consumables",
+      type: "spare_parts",
+      filter: (row) => isConsumablePart(row)
+    });
+  }
+  if (/\bspare\s*parts?\b/.test(q) || (/\bparts?\b/.test(q) && !/\btime[-\s]?based\b/.test(q))) {
+    intents.push({
+      id: "spare_parts",
+      label: "Spare Parts",
+      type: "spare_parts",
+      filter: () => true
+    });
+  }
+  if (/\b(troubleshoot|troubleshooting|faults?|problems?|failures?)\b/.test(q)) {
+    intents.push({
+      id: "troubleshooting",
+      label: "Troubleshooting",
+      type: "troubleshooting",
+      filter: () => true
+    });
+  }
+  if (/\b(maintenance\s+(rules?|tasks?|registry)|all\s+maintenance)\b/.test(q)) {
+    intents.push({
+      id: "maintenance_all",
+      label: "Maintenance Rules",
+      type: "maintenance",
+      filter: () => true
+    });
+  }
+  const seen = new Set();
+  return intents.filter(i => (seen.has(i.id) ? false : (seen.add(i.id), true)));
+}
+
+function formatRegistryContextRow(row, type) {
+  if (type === "spare_parts") {
+    return `- [Spare #${row.id}] ${row.equipment_title || "NA"} | ${row.part_name || "NA"} | ${row.part_number_code || "NA"} | loc: ${row.subsystem_location || "NA"} | page ${row.page || "NA"}`;
+  }
+  if (type === "troubleshooting") {
+    return `- [Troubleshoot #${row.id}] ${row.equipment_title || "NA"} | problem: ${row.problem || "NA"} | solution: ${row.root_cause_solution || "NA"} | page ${row.page || "NA"}`;
+  }
+  if (row.maintenance_work_description && activeEquipmentCategory === "Logbook") {
+    return `- [Logbook #${row.id}] ${row.date || "NA"} | ${row.maintenance_work_description || "NA"} | parts: ${row.parts_renewed || "NA"} | page ${row.page || "NA"}`;
+  }
+  return `- [Maint #${row.id}] ${row.equipment_title || "NA"} | ${row.subsystem_component || "NA"} | interval: ${row.maintenance_routine || "NA"} | ${row.checks_instructions || "NA"} | page ${row.page || "NA"}`;
+}
+
+function buildCopilotRetrieval(query) {
+  const queryLower = String(query || "").toLowerCase().trim();
+  const STOP_TOKENS = new Set([
+    "the", "and", "for", "with", "from", "that", "this", "what", "which", "when",
+    "where", "how", "about", "into", "please", "show", "list", "give", "tell", "you", "your"
+  ]);
+  const tokens = queryLower.split(/[^a-z0-9]+/).filter(t => t.length > 2 && !STOP_TOKENS.has(t));
+  const intents = resolveCopilotIntent(queryLower);
+
+  const pageMatches = [];
+  (loadedPages || []).forEach(page => {
+    let score = 0;
+    const pageText = String(page.text || "").toLowerCase();
+    tokens.forEach(token => {
+      if (pageText.includes(token)) score += 1;
+    });
+    if (score > 0) pageMatches.push({ pageNum: page.pageNum, text: page.text, score });
+  });
+  pageMatches.sort((a, b) => b.score - a.score);
+
+  function scoreRegistryRow(row, type) {
+    let text = "";
+    if (type === "maintenance") {
+      text = `${row.equipment_title} ${row.subsystem_component} ${row.maintenance_routine} ${row.checks_instructions} ${row.date || ""} ${row.maintenance_work_description || ""}`;
+    } else if (type === "spare_parts") {
+      text = `${row.equipment_title} ${row.subsystem_location} ${row.part_name} ${row.part_number_code} ${row.drawing_model_no} ${row.part_categorization}`;
+    } else {
+      text = `${row.equipment_title} ${row.subsystem_component} ${row.problem} ${row.root_cause_solution}`;
+    }
+    text = text.toLowerCase();
+    let score = 0;
+    tokens.forEach(token => {
+      if (text.includes(token)) score += 1;
+    });
+    if (queryLower.length > 4 && text.includes(queryLower)) score += 3;
+    return score;
+  }
+
+  const registryPools = [
+    { type: "maintenance", rows: maintenanceRegistry },
+    { type: "spare_parts", rows: sparePartsRegistry },
+    { type: "troubleshooting", rows: troubleshootingRegistry }
+  ];
+
+  const intentSummaryLines = [];
+  const allRegistryMatches = [];
+  const intentMatchedKeys = new Set();
+
+  intents.forEach(intent => {
+    const pool = registryPools.find(p => p.type === intent.type);
+    const rows = (pool && pool.rows) || [];
+    const matched = rows.filter(intent.filter);
+    intentSummaryLines.push(`- Dashboard "${intent.label}": ${matched.length} of ${rows.length} rows`);
+    matched.forEach(row => {
+      const key = `${intent.type}:${row.id}`;
+      if (intentMatchedKeys.has(key)) return;
+      intentMatchedKeys.add(key);
+      allRegistryMatches.push({
+        rowId: row.id,
+        score: 100 + matched.length,
+        type: intent.type,
+        row,
+        snippet: formatRegistryContextRow(row, intent.type),
+        viaIntent: intent.id
+      });
+    });
+  });
+
+  registryPools.forEach(pool => {
+    (pool.rows || []).forEach(row => {
+      const key = `${pool.type}:${row.id}`;
+      if (intentMatchedKeys.has(key)) return;
+      const score = scoreRegistryRow(row, pool.type);
+      if (score > 0) {
+        allRegistryMatches.push({
+          rowId: row.id,
+          score,
+          type: pool.type,
+          row,
+          snippet: formatRegistryContextRow(row, pool.type)
+        });
+      }
+    });
+  });
+  allRegistryMatches.sort((a, b) => b.score - a.score);
+
+  let gridMatches = [];
+  if (intents.length > 0) {
+    const preferType = intents[0].type;
+    gridMatches = allRegistryMatches.filter(m => m.type === preferType && m.viaIntent);
+    if (!gridMatches.length) gridMatches = allRegistryMatches.filter(m => m.type === preferType);
+  } else {
+    gridMatches = allRegistryMatches.filter(m => m.type === activeRegistryTab);
+    if (!gridMatches.length && allRegistryMatches.length) {
+      const bestType = allRegistryMatches[0].type;
+      gridMatches = allRegistryMatches.filter(m => m.type === bestType);
+    }
+  }
+
+  return {
+    tokens,
+    intents,
+    intentSummaryLines,
+    pageMatches,
+    allRegistryMatches,
+    gridMatches,
+    matchingRecordIds: gridMatches.map(m => m.rowId)
+  };
+}
+
 async function processCognitiveChatSearch(query) {
   appendUserMessage(query);
-  
-  // Show typing loader
+
+  const loggedIn = typeof window.isLoggedIn === "function" && window.isLoggedIn();
+  if (typeof window.requireAuthForApi === "function") {
+    try { window.requireAuthForApi(); } catch (e) {
+      appendAssistantReply("Sign in required to use Copilot.");
+      return;
+    }
+  }
+
+  // Logged-in users use server Copilot (Gemini key on API). Guests still need local engine mode.
+  if (!loggedIn && engineMode !== "gemini" && engineMode !== "ollama") {
+    appendAssistantReply("Copilot requires **Gemini** or **Ollama** in AI Parsing Engine Settings (or sign in for server Copilot).");
+    return;
+  }
+  if (typeof isExtracting !== "undefined" && isExtracting) {
+    appendAssistantReply("Extraction is running. Wait until it finishes so Copilot does not compete with active users' extract jobs.");
+    return;
+  }
+
+  if (loggedIn && window.authState && window.authState.user) {
+    if (window.authState.user.copilot_remaining_today <= 0) {
+      appendAssistantReply(`Daily Copilot AI limit reached (**${window.authState.user.copilot_daily_limit}/day** for your account). Ask Global Admin to raise your limit.`);
+      if (typeof window.applyUserPolicyToUi === "function") window.applyUserPolicyToUi();
+      return;
+    }
+  } else if (remainingCopilotLlmQuota() <= 0) {
+    appendAssistantReply(`Daily Copilot AI limit reached (**${COPILOT_LLM_DAILY_LIMIT}/user/day**). Try again tomorrow.`);
+    updateCopilotQuotaBadge();
+    return;
+  }
+
   const loader = document.createElement("div");
   loader.className = "chat-message assistant";
   loader.id = "chat-loader";
+  const leftHint = loggedIn && window.authState.user
+    ? `${window.authState.user.copilot_remaining_today}/${window.authState.user.copilot_daily_limit}`
+    : `${remainingCopilotLlmQuota()}/${COPILOT_LLM_DAILY_LIMIT}`;
   loader.innerHTML = `
     <div class="msg-avatar"><i data-lucide="bot"></i></div>
     <div class="msg-content">
-      <p>${engineMode === "ollama" ? "Synthesizing answer with local LLM..." : engineMode === "gemini" ? "Synthesizing answer with Gemini API..." : "Consulting cog-search indexes..."}</p>
+      <p>${loggedIn ? "Asking server Copilot…" : (engineMode === "gemini" ? "Asking Gemini…" : "Asking Ollama…")} (${leftHint} AI left today)</p>
     </div>
   `;
   chatMessages.appendChild(loader);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   safeCreateIcons();
 
-  // Query Tokenization
-  const tokens = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
-  if (tokens.length === 0) {
+  if (!String(query || "").trim()) {
     const loaderElem = document.getElementById("chat-loader");
     if (loaderElem) loaderElem.remove();
-    appendAssistantReply("Could you please specify a longer query so I can parse the document indexes accurately?");
+    appendAssistantReply("Please enter a question about the uploaded manual or extracted registry.");
     return;
   }
 
-  // Context Search on loadedPages
-  let pageMatches = [];
-  loadedPages.forEach(page => {
-    let score = 0;
-    tokens.forEach(token => {
-      if (page.text.toLowerCase().includes(token)) {
-        score += 1;
-      }
-    });
-    if (score > 0) {
-      pageMatches.push({ pageNum: page.pageNum, text: page.text, score: score });
-    }
-  });
-  pageMatches.sort((a, b) => b.score - a.score);
+  const retrieval = buildCopilotRetrieval(query);
+  const { intents, intentSummaryLines, pageMatches, allRegistryMatches, gridMatches, matchingRecordIds } = retrieval;
 
-  // Database Grid matching logic (find record matches to auto filter in active tab)
-  let gridMatches = [];
-  let currentRegistry = maintenanceRegistry;
-  if (activeRegistryTab === "spare_parts") currentRegistry = sparePartsRegistry;
-  if (activeRegistryTab === "troubleshooting") currentRegistry = troubleshootingRegistry;
-  
-  currentRegistry.forEach(row => {
-    let score = 0;
-    tokens.forEach(token => {
-      let text = "";
-      if (activeRegistryTab === "maintenance") {
-        text = `${row.equipment_title} ${row.subsystem_component} ${row.maintenance_routine} ${row.checks_instructions}`;
-      } else if (activeRegistryTab === "spare_parts") {
-        text = `${row.equipment_title} ${row.subsystem_location} ${row.part_name} ${row.part_number_code} ${row.drawing_model_no} ${row.part_categorization}`;
-      } else if (activeRegistryTab === "troubleshooting") {
-        text = `${row.equipment_title} ${row.subsystem_component} ${row.problem} ${row.root_cause_solution}`;
-      }
-      text = text.toLowerCase();
-      if (text.includes(token)) {
-        score += 1;
-      }
-    });
-    if (score > 0) {
-      gridMatches.push({ rowId: row.id, score: score });
-    }
-  });
-  gridMatches.sort((a, b) => b.score - a.score);
-  const matchingRecordIds = gridMatches.map(m => m.rowId);
+  const contextParts = [];
+  if (intentSummaryLines.length) {
+    contextParts.push(
+      `[Dashboard metrics]\n${intentSummaryLines.join("\n")}\n` +
+      `Totals — maintenance: ${maintenanceRegistry.length}; spare parts: ${sparePartsRegistry.length}; troubleshooting: ${troubleshootingRegistry.length}.`
+    );
+  }
 
-  // If a cloud/local LLM engine mode is active
-  if (engineMode === "ollama" || engineMode === "gemini") {
-    try {
-      let contextText = "";
-      let topPageNum = null;
-      
-      if (pageMatches.length > 0) {
-        // Use the top 2 matching pages for rich context retrieval
-        const topPages = pageMatches.slice(0, 2);
-        topPageNum = topPages[0].pageNum;
-        contextText = topPages.map(p => `[Page ${p.pageNum} text]:\n${p.text}`).join("\n\n");
-      } else {
-        contextText = "No relevant text matching this query was found in the document.";
-      }
+  const topRegistryLimit = intents.length > 0 ? 25 : 12;
+  const topRegistry = allRegistryMatches.slice(0, topRegistryLimit);
+  if (topRegistry.length) {
+    contextParts.push(
+      `[Extracted registry matches (${topRegistry.length}${allRegistryMatches.length > topRegistryLimit ? ` of ${allRegistryMatches.length}` : ""})]:\n` +
+      topRegistry.map(m => m.snippet).join("\n")
+    );
+  }
 
-      const ragPrompt = `You are a helpful AI technical assistant for engineers. Answer the user's question about the technical manual.
-Answer using the provided document context below as your primary source of truth. If the answer cannot be found in the context, clearly explain that it is not explicitly mentioned in the manual, and optionally provide a brief general answer if relevant.
-Keep the answer concise, technical, and directly useful. Do not hallucinate model codes or values.
+  let topPageNum = null;
+  if (pageMatches.length) {
+    const topPages = pageMatches.slice(0, intents.length ? 1 : 2);
+    topPageNum = topPages[0].pageNum;
+    contextParts.push(topPages.map(p => `[Page ${p.pageNum} text]:\n${String(p.text || "").slice(0, 3000)}`).join("\n\n"));
+  } else if (topRegistry.length) {
+    const pageFromRow = topRegistry.find(m => m.row && m.row.page != null && m.row.page !== "NA");
+    if (pageFromRow) topPageNum = pageFromRow.row.page;
+  }
+
+  if (!contextParts.length) {
+    contextParts.push(
+      "No matching registry rows or page text were found for this query. " +
+      "Say so clearly and suggest the user upload/extract a manual or try a different term."
+    );
+  }
+
+  const contextText = contextParts.join("\n\n").slice(0, 12000);
+
+  try {
+    let aiReply = "";
+    let engineLabel = "";
+    let left = 0;
+    let limit = COPILOT_LLM_DAILY_LIMIT;
+
+    if (loggedIn) {
+      const allowed = (typeof window.getAssignedGeminiModels === "function")
+        ? window.getAssignedGeminiModels()
+        : null;
+      let model = (window.authState.user && window.authState.user.preferred_model) || geminiModel;
+      if (allowed && allowed.length && !allowed.includes(model)) model = allowed[0];
+      if (geminiModelInput && geminiModelInput.value && (!allowed || allowed.includes(geminiModelInput.value))) {
+        model = geminiModelInput.value;
+      }
+      const resp = await fetch(`${apiBaseUrl}/api/copilot`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...((typeof window.getAuthHeaders === "function") ? window.getAuthHeaders() : {})
+        },
+        body: JSON.stringify({ question: query, context: contextText, model })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const detail = typeof data.detail === "string" ? data.detail : (data.detail ? JSON.stringify(data.detail) : `HTTP ${resp.status}`);
+        throw new Error(detail);
+      }
+      aiReply = data.answer || "";
+      left = data.copilot_remaining_today;
+      limit = data.copilot_daily_limit;
+      engineLabel = `Server Copilot (<strong>${escapeHTML(data.model || model)}</strong>)`;
+      if (typeof window.refreshMe === "function") await window.refreshMe();
+      if (typeof window.applyUserPolicyToUi === "function") window.applyUserPolicyToUi();
+    } else {
+      if (!consumeCopilotLlmQuota()) {
+        const loaderElem = document.getElementById("chat-loader");
+        if (loaderElem) loaderElem.remove();
+        appendAssistantReply(`Daily Copilot AI limit reached (**${COPILOT_LLM_DAILY_LIMIT}/user/day**).`);
+        return;
+      }
+      const ragPrompt = `You are a helpful AI technical assistant for OmniParse IDP.
+Answer using the provided context (dashboard metrics + extracted registry rows + optional page text).
+When dashboard metrics say rows exist (e.g. time-based tasks), you MUST use those registry matches — do not claim they are missing.
+Keep answers concise and technical. Cite page numbers when available. Do not invent intervals or part numbers.
+If user wording differs slightly from titles, map to the closest registry entries and say what you matched.
 
 Document Context:
 """
@@ -4283,107 +4962,52 @@ ${contextText}
 """
 
 User Question: ${query}`;
-
-      const aiReply = await callLLMRagAnswer(ragPrompt);
-
-      const loaderElem = document.getElementById("chat-loader");
-      if (loaderElem) loaderElem.remove();
-
-      let responseHTML = `<div style="line-height: 1.5; white-space: normal;">${renderMarkdown(aiReply)}</div>`;
-      
-      const ragEngineLabel = engineMode === "gemini" ? `Gemini RAG (Model: <strong>${geminiModel}</strong>)` : `Ollama RAG (Model: <strong>${ollamaModel}</strong>)`;
-      responseHTML += `<div class="msg-meta">
-        <span>${ragEngineLabel}</span>
-        ${topPageNum ? `<span class="page-ref">Page ${topPageNum}</span>` : '<span class="page-ref">General Context</span>'}
-      </div>`;
-
-      if (gridMatches.length > 0) {
-        responseHTML += `<button class="msg-action-btn" onclick="applyChatFilter([${matchingRecordIds.join(',')}])">
-          <i data-lucide="filter" style="width:14px;height:14px;"></i>
-          <span>Filter Grid to ${gridMatches.length} Matches</span>
-        </button>`;
+      try {
+        aiReply = await callLLMRagAnswer(ragPrompt);
+      } catch (innerErr) {
+        refundCopilotLlmQuota();
+        throw innerErr;
       }
-
-      const msg = document.createElement("div");
-      msg.className = "chat-message assistant";
-      msg.innerHTML = `
-        <div class="msg-avatar"><i data-lucide="bot"></i></div>
-        <div class="msg-content" style="border-color: var(--accent-cyan-glow);">
-          ${responseHTML}
-        </div>
-      `;
-      chatMessages.appendChild(msg);
-      chatMessages.scrollTop = chatMessages.scrollHeight;
-      safeCreateIcons();
-      return;
-
-    } catch (err) {
-      const engineLabel = engineMode === "gemini" ? "Gemini" : "Ollama";
-      console.error(`${engineLabel} RAG failed, falling back to heuristics:`, err);
-      appendChatSystemMessage(`⚠️ **${engineLabel} connection failed**: ${err.message}. Falling back to keyword search index.`);
+      left = remainingCopilotLlmQuota();
+      engineLabel = engineMode === "gemini"
+        ? `Gemini (<strong>${geminiModel}</strong>)`
+        : `Ollama (<strong>${ollamaModel}</strong>)`;
+      updateCopilotQuotaBadge();
     }
-  }
 
-  // HEURISTICS TEXT-MATCHING FALLBACK
-  setTimeout(() => {
-    // Remove loader
     const loaderElem = document.getElementById("chat-loader");
     if (loaderElem) loaderElem.remove();
 
-    if (pageMatches.length === 0 && gridMatches.length === 0) {
-      appendAssistantReply(`I searched the document context but couldn't find matches relating to **"${query}"**. Try asking about **lubrication**, **caliper clearance**, **gearbox**, or **spare parts**.`);
-      return;
+    let responseHTML = `<div style="line-height:1.5;white-space:normal;">${renderMarkdown(aiReply)}</div>`;
+    if (intents.length) {
+      responseHTML += `<div class="msg-excerpt" style="font-style:normal;margin-top:0.5rem;">Intent: <strong>${escapeHTML(intents.map(i => i.label).join(", "))}</strong></div>`;
     }
-
-    // Synthesize response context
-    let topPage = pageMatches[0];
-    
-    // Locate specific sentence containing matching terms inside the page for premium visual excerpt
-    let excerpt = "";
-    if (topPage) {
-      const sentences = topPage.text.split(/(?<=[.?!])\s+/);
-      const bestSentence = sentences.find(s => tokens.some(t => s.toLowerCase().includes(t)));
-      excerpt = bestSentence ? bestSentence.trim() : topPage.text.slice(0, 150) + "...";
+    // No engine/quota meta line — only a page reference when there is one.
+    const pageRef = pageRefHtml(topPageNum);
+    if (pageRef) {
+      responseHTML += `<div class="msg-meta">${pageRef}</div>`;
     }
-
-    let responseHTML = "";
-    if (gridMatches.length > 0) {
-      responseHTML += `I identified **${gridMatches.length}** maintenance rules or spare parts matching your query in the active database. `;
-      if (topPage) {
-        responseHTML += `On **Page ${topPage.pageNum}**, the document states:`;
-        responseHTML += `<div class="msg-excerpt">"${escapeHTML(excerpt)}"</div>`;
-      }
-      responseHTML += `<div class="msg-meta">
-        <span>Context Match: <strong>${Math.min(tokens.length, topPage ? topPage.score : 1)} / ${tokens.length} keywords</strong></span>
-        ${topPage ? `<span class="page-ref">Page ${topPage.pageNum}</span>` : ''}
-      </div>`;
+    if (matchingRecordIds.length) {
       responseHTML += `<button class="msg-action-btn" onclick="applyChatFilter([${matchingRecordIds.join(',')}])">
         <i data-lucide="filter" style="width:14px;height:14px;"></i>
-        <span>Filter Grid to this Result</span>
+        <span>Filter Grid to ${matchingRecordIds.length} Matches</span>
       </button>`;
-    } else {
-      // Text context match only
-      responseHTML += `I found a textual match in the document context on **Page ${topPage.pageNum}**:`;
-      responseHTML += `<div class="msg-excerpt">"${escapeHTML(excerpt)}"</div>`;
-      responseHTML += `<div class="msg-meta">
-        <span>Keyword overlap: <strong>${topPage.score} matches</strong></span>
-        <span class="page-ref">Page ${topPage.pageNum}</span>
-      </div>`;
     }
 
     const msg = document.createElement("div");
     msg.className = "chat-message assistant";
     msg.innerHTML = `
       <div class="msg-avatar"><i data-lucide="bot"></i></div>
-      <div class="msg-content">
-        <p>${responseHTML}</p>
-      </div>
+      <div class="msg-content" style="border-color: var(--accent-cyan-glow);">${responseHTML}</div>
     `;
     chatMessages.appendChild(msg);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     safeCreateIcons();
-
-  }, 600);
+  } catch (err) {
+    const loaderElem = document.getElementById("chat-loader");
+    if (loaderElem) loaderElem.remove();
+    appendChatSystemMessage(`⚠️ Copilot AI failed: ${err.message}`);
+  }
 }
 
 function appendAssistantReply(text) {
@@ -4398,6 +5022,140 @@ function appendAssistantReply(text) {
   chatMessages.appendChild(msg);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   safeCreateIcons();
+}
+
+function pageRefHtml(pageNum) {
+  if (pageNum == null || pageNum === "" || pageNum === "NA") {
+    return "";
+  }
+  const n = Number(pageNum);
+  if (!Number.isFinite(n)) {
+    return `<span class="page-ref">${escapeHTML(String(pageNum))}</span>`;
+  }
+  return `<button type="button" class="page-ref page-ref-btn" onclick="jumpToPageContext(${n})" title="View extracted text from page ${n}">Page ${n}</button>`;
+}
+
+function getActiveRegistry() {
+  if (activeRegistryTab === "spare_parts") return sparePartsRegistry;
+  if (activeRegistryTab === "troubleshooting") return troubleshootingRegistry;
+  return maintenanceRegistry;
+}
+
+function getSelectedRegistryRow() {
+  if (selectedRegistryRowId == null) return null;
+  return getActiveRegistry().find(r => r.id === selectedRegistryRowId) || null;
+}
+
+function selectRegistryRow(id, trEl) {
+  selectedRegistryRowId = id;
+  document.querySelectorAll(".data-table tr.row-selected").forEach(r => r.classList.remove("row-selected"));
+  if (trEl) trEl.classList.add("row-selected");
+  updateAskSelectedBar();
+}
+
+function clearSelectedRegistryRow() {
+  selectedRegistryRowId = null;
+  document.querySelectorAll(".data-table tr.row-selected").forEach(r => r.classList.remove("row-selected"));
+  updateAskSelectedBar();
+}
+
+function updateAskSelectedBar() {
+  const bar = document.getElementById("ask-selected-bar");
+  const label = document.getElementById("ask-selected-label");
+  if (!bar || !label) return;
+  const row = getSelectedRegistryRow();
+  if (!row) {
+    bar.hidden = true;
+    label.textContent = "Row selected";
+    return;
+  }
+  bar.hidden = false;
+  let summary = `#${row.id}`;
+  if (activeRegistryTab === "maintenance") {
+    summary = `#${row.id} · ${row.subsystem_component || row.equipment_title || "Maintenance"}`;
+  } else if (activeRegistryTab === "spare_parts") {
+    summary = `#${row.id} · ${row.part_name || row.equipment_title || "Spare part"}`;
+  } else if (activeRegistryTab === "troubleshooting") {
+    summary = `#${row.id} · ${row.problem || row.equipment_title || "Issue"}`;
+  } else if (row.maintenance_work_description) {
+    summary = `#${row.id} · ${String(row.maintenance_work_description).slice(0, 48)}`;
+  }
+  label.textContent = summary;
+  safeCreateIcons();
+}
+
+function buildAskAboutRowQuery(row) {
+  if (activeRegistryTab === "spare_parts") {
+    return `Explain this spare part from the manual in more detail: Equipment "${row.equipment_title || "NA"}", part "${row.part_name || "NA"}", part number "${row.part_number_code || "NA"}", location "${row.subsystem_location || "NA"}". What should the technician know?`;
+  }
+  if (activeRegistryTab === "troubleshooting") {
+    return `Explain this troubleshooting item from the manual: Equipment "${row.equipment_title || "NA"}", problem "${row.problem || "NA"}", solution "${row.root_cause_solution || "NA"}". Expand with any related guidance in the document.`;
+  }
+  if (activeEquipmentCategory === "Logbook" || row.maintenance_work_description) {
+    return `Explain this field history / logbook entry using the document context: Date "${row.date || "NA"}", work "${row.maintenance_work_description || "NA"}", parts renewed "${row.parts_renewed || "NA"}", attended by "${row.attended_by || "NA"}".`;
+  }
+  return `Explain this maintenance task from the manual in more detail: Equipment "${row.equipment_title || "NA"}", component "${row.subsystem_component || "NA"}", routine "${row.maintenance_routine || "NA"}", instructions: "${row.checks_instructions || "NA"}". Cite the relevant page if possible.`;
+}
+
+function askAboutSelectedRow() {
+  const row = getSelectedRegistryRow();
+  if (!row) {
+    appendChatSystemMessage("Select a registry row first, then click **Ask about row**.");
+    return;
+  }
+  if (!loadedPages || loadedPages.length === 0) {
+    appendChatSystemMessage("Upload a document first so Copilot can answer from the manual.");
+    return;
+  }
+  processCognitiveChatSearch(buildAskAboutRowQuery(row));
+}
+
+window.jumpToPageContext = function(pageNum) {
+  const n = Number(pageNum);
+  const modal = document.getElementById("page-context-modal");
+  const title = document.getElementById("page-context-title");
+  const body = document.getElementById("page-context-body");
+  if (!modal || !title || !body) return;
+
+  const page = (loadedPages || []).find(p => Number(p.pageNum) === n);
+  title.textContent = `Page ${n}`;
+  if (!page || !page.text) {
+    body.textContent = "No extracted text is available for this page. Re-run extraction with Native/OCR so Copilot can show the source text.";
+  } else {
+    body.textContent = page.text.trim();
+  }
+  modal.hidden = false;
+
+  // Highlight registry rows that cite this page
+  const matchingIds = getActiveRegistry()
+    .filter(r => Number(r.page) === n)
+    .map(r => r.id);
+  if (matchingIds.length > 0) {
+    highlightRecordIds = matchingIds;
+    const oldChip = document.getElementById("chat-filter-chip");
+    if (oldChip) oldChip.remove();
+    const chip = document.createElement("button");
+    chip.className = "tab-btn active";
+    chip.id = "chat-filter-chip";
+    chip.innerHTML = `<i data-lucide="file-text" style="width:12px;height:12px;display:inline-block;margin-right:4px;"></i>Page ${n} rows`;
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+      if (btn.id !== "chat-filter-chip") btn.classList.remove("active");
+    });
+    filterTabs.appendChild(chip);
+    chip.addEventListener("click", () => {
+      highlightRecordIds = [];
+      chip.remove();
+      const allBtn = document.querySelector(".tab-btn[data-filter='all']");
+      if (allBtn) allBtn.click();
+    });
+    renderGrid();
+    safeCreateIcons();
+  }
+};
+
+function closePageContextModal() {
+  const modal = document.getElementById("page-context-modal");
+  if (modal) modal.hidden = true;
 }
 
 // Triggered by the chatbot filter action buttons
@@ -4438,11 +5196,51 @@ chatForm.addEventListener("submit", (e) => {
   }
 });
 
-// Chat suggestions
-document.addEventListener("click", (e) => {
-  const suggestion = e.target.closest(".suggestion-chip");
-  if (suggestion) {
-    processCognitiveChatSearch(suggestion.innerText);
+const askSelectedBtn = document.getElementById("ask-selected-btn");
+const askSelectedClear = document.getElementById("ask-selected-clear");
+const pageContextModal = document.getElementById("page-context-modal");
+const pageContextClose = document.getElementById("page-context-close");
+
+if (askSelectedBtn) {
+  askSelectedBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    askAboutSelectedRow();
+  });
+}
+if (askSelectedClear) {
+  askSelectedClear.addEventListener("click", (e) => {
+    e.preventDefault();
+    clearSelectedRegistryRow();
+  });
+}
+if (pageContextClose) {
+  pageContextClose.addEventListener("click", closePageContextModal);
+}
+if (pageContextModal) {
+  pageContextModal.addEventListener("click", (e) => {
+    if (e.target === pageContextModal) closePageContextModal();
+  });
+}
+
+const qualityScoreCard = document.getElementById("card-quality-score");
+const qualityScoreModal = document.getElementById("quality-score-modal");
+const qualityScoreClose = document.getElementById("quality-score-close");
+if (qualityScoreCard) {
+  qualityScoreCard.addEventListener("click", openQualityScoreModal);
+}
+if (qualityScoreClose) {
+  qualityScoreClose.addEventListener("click", closeQualityScoreModal);
+}
+if (qualityScoreModal) {
+  qualityScoreModal.addEventListener("click", (e) => {
+    if (e.target === qualityScoreModal) closeQualityScoreModal();
+  });
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closePageContextModal();
+    closeQualityScoreModal();
   }
 });
 
@@ -4452,39 +5250,9 @@ document.addEventListener("click", (e) => {
 
 function initApp() {
   initPreloadedContext();
+  initProgressCardDrag();
   renderGrid();
-  
-  // Initialize settings panel visibility and state on page load
-  if (engineModeSelect) {
-    // Restore persisted mode (defaults to Gemini) so refresh doesn't silently switch back to Ollama.
-    engineModeSelect.value = engineMode;
-    if (engineMode === "ollama") {
-      ollamaSettingsGroup.style.display = "block";
-      if (geminiSettingsGroup) geminiSettingsGroup.style.display = "none";
-      syncOllama();
-    } else if (engineMode === "gemini") {
-      ollamaSettingsGroup.style.display = "none";
-      if (geminiSettingsGroup) geminiSettingsGroup.style.display = "block";
-      syncGemini();
-    } else {
-      ollamaSettingsGroup.style.display = "none";
-      if (geminiSettingsGroup) geminiSettingsGroup.style.display = "none";
-      updateOllamaStatus("offline", "Local Heuristics");
-    }
-  }
-
-  // Surface API availability in the header status label
-  checkPythonApiHealth().then(health => {
-    const label = document.querySelector(".status-label");
-    if (!label) return;
-    if (health.ok && health.busy) {
-      label.textContent = "API Busy (extracting)";
-    } else if (health.ok) {
-      label.textContent = "Python API Ready";
-    } else {
-      label.textContent = "Browser Engine Ready";
-    }
-  });
+  updateCopilotQuotaBadge();
 }
 
 initApp();

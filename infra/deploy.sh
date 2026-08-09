@@ -14,7 +14,7 @@
 #   export PUBLIC_SUBNET_2=subnet-0fbbead678ee09529
 #   export PRIVATE_SUBNET_1=subnet-032aa6bf16272b410
 #   export PRIVATE_SUBNET_2=subnet-04a7ee472cd672864
-#   export GEMINI_API_KEY=your_key   # optional
+#   # Do NOT pass GEMINI_API_KEY if Secrets Manager already has it — omit to keep existing secret.
 #   ./infra/deploy.sh
 
 set -euo pipefail
@@ -154,12 +154,17 @@ fi
 
 # ----- 4) Sync UI + invalidate -----
 echo "==> Syncing UI to s3://$UI_BUCKET ..."
+# Keep existing Secrets Manager Gemini key: do not pass empty GEMINI_API_KEY on deploy.
 aws s3 sync "$ROOT" "s3://$UI_BUCKET" \
   --exclude "*" \
   --include "index.html" \
+  --include "admin.html" \
+  --include "history.html" \
   --include "app.js" \
+  --include "auth-admin.js" \
   --include "styles.css" \
   --include "equipment_manifest.json" \
+  --include "assets/*" \
   --cache-control "public,max-age=60"
 
 if [[ -n "$DIST_ID" && "$DIST_ID" != "None" ]]; then
