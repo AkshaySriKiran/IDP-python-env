@@ -54,8 +54,8 @@ fi
 echo "==> docker login $REGISTRY"
 echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin "$REGISTRY"
 
-echo "==> Building API image ($PROJECT_NAME-api:$IMAGE_TAG)..."
-docker build -t "$PROJECT_NAME-api:$IMAGE_TAG" -f "$ROOT/backend/Dockerfile" "$ROOT/backend"
+echo "==> Building API image for linux/amd64 ($PROJECT_NAME-api:$IMAGE_TAG)..."
+docker build --platform linux/amd64 -t "$PROJECT_NAME-api:$IMAGE_TAG" -f "$ROOT/backend/Dockerfile" "$ROOT/backend"
 docker tag "$PROJECT_NAME-api:$IMAGE_TAG" "$ECR_URI:$IMAGE_TAG"
 docker tag "$PROJECT_NAME-api:$IMAGE_TAG" "$ECR_URI:latest"
 

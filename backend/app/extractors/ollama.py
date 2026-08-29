@@ -4,6 +4,8 @@ from typing import Any, Optional
 
 import httpx
 
+from ..config import get_allowed_ollama_hosts, get_default_ollama_url
+from ..security import validate_outbound_url
 from .parse import process_raw_model_response
 from .prompts import build_extraction_prompt
 
@@ -23,7 +25,12 @@ async def run_ollama_extractor(
     if not model or not model.strip():
         raise ValueError("Ollama model is required.")
 
-    base = (ollama_url or "http://localhost:11434").rstrip("/")
+    # Guard against SSRF
+    safe_base = validate_outbound_url(
+        ollama_url or get_default_ollama_url(),
+        allowed_hosts=get_allowed_ollama_hosts(),
+    )
+
     prompt = build_extraction_prompt(
         text,
         doc_name,
@@ -41,7 +48,7 @@ async def run_ollama_extractor(
         body["images"] = [base64_image]
 
     async with httpx.AsyncClient(timeout=timeout_s) as client:
-        resp = await client.post(f"{base}/api/generate", json=body)
+        resp = await client.post(f"{safe_base}/api/generate", json=body)
         if not resp.is_success:
             raise RuntimeError(f"Ollama API HTTP {resp.status_code}: {resp.text[:400]}")
         data = resp.json()

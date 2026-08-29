@@ -1,36 +1,37 @@
-# Secrets & local env (never commit)
+# Environment & Secrets
 .env
 .env.*
 !.env.example
-!infra/.env.deploy.example
-infra/.env.deploy
 *.pem
 *.key
-*credentials*.json
-*service-account*.json
-google-services.json
+*.pfx
 
-# OS / editor
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Local databases & persistent caches
+data/
+*.sqlite
+*.db
+.jwt_secret
+
+# Logs & temp files
+*.log
+logs/
+.tmp*
 .DS_Store
 Thumbs.db
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Logs & local scratch
-*.log
-output.log
 .Rhistory
-.tmp-*/
-.tmp-*/**
 
-# Local caches / deps
-node_modules/
-.venv/
-backend/.venv/
-backend/data/
-__pycache__/
-*.pyc
-.pytest_cache/
-.mypy_cache/
+# IDE & Editor files
+.vscode/
+.idea/
+.cursor/

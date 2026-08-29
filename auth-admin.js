@@ -61,6 +61,15 @@ function getAuthToken() {
   }
 }
 
+function getStoredUser() {
+  try {
+    const raw = sessionStorage.getItem(AUTH_USER_KEY) || localStorage.getItem(AUTH_USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function getAuthHeaders(extra = {}) {
   const headers = { ...extra };
   const token = getAuthToken();
@@ -69,6 +78,8 @@ function getAuthHeaders(extra = {}) {
 }
 
 function saveAuthSession(token, user) {
+  closeAccessDeniedModal();
+  window._accessDeniedShown = false;
   authState.token = token;
   authState.user = user;
   try {
@@ -97,6 +108,15 @@ function isLoggedIn() {
 
 function isAdminUser() {
   return isLoggedIn() && authState.user && authState.user.role === "admin";
+}
+
+function getUserRole() {
+  if (authState && authState.user && authState.user.role) {
+    return String(authState.user.role).toLowerCase();
+  }
+  const u = getStoredUser();
+  if (u && u.role) return String(u.role).toLowerCase();
+  return "editor";
 }
 
 function isLocalHost(hostname) {
@@ -179,7 +199,7 @@ async function refreshMe() {
   return user;
 }
 
-/* Row-level confidence scores and the quality filter are admin-only. */
+/* Quality filter is admin-only. Confidence % + Why-this-score popup stay visible for all users. */
 function applyRoleBasedUi() {
   const admin = isAdminUser();
   document.body.classList.toggle("hide-quality-ui", !admin);
@@ -190,6 +210,20 @@ function applyRoleBasedUi() {
       confSel.value = "all";
       confSel.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  }
+  const role = getUserRole();
+  const notifWrap = document.getElementById("approvals-notif-wrap");
+  if (notifWrap) {
+    notifWrap.hidden = role !== "approver" && role !== "admin";
+  }
+  if (typeof renderGrid === "function") {
+    try { renderGrid(); } catch (e) {}
+  }
+  if (typeof updateRoleActionButtons === "function") {
+    try { updateRoleActionButtons(); } catch (e) {}
+  }
+  if (typeof window.fetchPendingApprovals === "function") {
+    try { window.fetchPendingApprovals(); } catch (e) {}
   }
 }
 
@@ -224,7 +258,8 @@ function applyUserPolicyToUi() {
     if (profileDropName) profileDropName.textContent = label;
     if (profileDropEmail) profileDropEmail.textContent = u.email || "";
     if (profileDropMeta) {
-      const roleLabel = u.role === "admin" ? "Global Admin" : "User";
+      const roleStr = u.role || "user";
+      const roleLabel = roleStr === "admin" ? "Global Admin" : (roleStr.charAt(0).toUpperCase() + roleStr.slice(1));
       profileDropMeta.textContent = `${roleLabel} · AI ${u.copilot_remaining_today}/${u.copilot_daily_limit} left`;
     }
     if (logoutBtn) logoutBtn.hidden = false;
@@ -239,6 +274,19 @@ function applyUserPolicyToUi() {
     if (historyBtn) {
       historyBtn.hidden = false;
       historyBtn.style.display = "";
+    }
+
+    const histSummary = document.getElementById("history-summary");
+    if (histSummary) {
+      const showSummary = u.role === "admin";
+      histSummary.hidden = !showSummary;
+      histSummary.style.display = showSummary ? "" : "none";
+    }
+
+    const adminScopeWrap = document.getElementById("history-admin-scope-wrap");
+    if (adminScopeWrap) {
+      const showScope = u.role === "admin";
+      adminScopeWrap.style.display = showScope ? "flex" : "none";
     }
 
     if (badge) {
@@ -263,6 +311,8 @@ function applyUserPolicyToUi() {
       historyBtn.hidden = true;
       historyBtn.style.display = "none";
     }
+    const adminScopeWrap = document.getElementById("history-admin-scope-wrap");
+    if (adminScopeWrap) adminScopeWrap.style.display = "none";
     const modelSelect = document.getElementById("gemini-model-select");
     if (modelSelect) modelSelect.disabled = false;
     const hint = document.getElementById("gemini-model-policy-hint");
@@ -331,7 +381,17 @@ function toggleProfileMenu() {
   trigger.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
+function isSharedView() {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    return Boolean((params.get("share") || "").trim());
+  } catch (_) {
+    return false;
+  }
+}
+
 function openLoginModal(message = "") {
+  if (isSharedView()) return; // Anonymous shared link viewers do not need login
   const modal = document.getElementById("login-modal");
   const err = document.getElementById("login-error");
   if (err) err.textContent = message || "";
@@ -345,6 +405,31 @@ function closeLoginModal() {
   if (modal) modal.hidden = true;
 }
 
+function openAccessDeniedModal(email = "", reason = "") {
+  window._accessDeniedShown = true;
+  closeLoginModal();
+  const modal = document.getElementById("access-denied-modal");
+  const msgEl = document.getElementById("access-denied-message");
+  if (msgEl) {
+    if (email) {
+      msgEl.innerHTML = `The account <strong>${escapeAuthHtml(email)}</strong> is not on the authorized user list for DocuLoom.<br><br><span style="font-size: 0.82rem; color: var(--text-muted);">Please contact your system administrator to be added to the access list in Microsoft Fabric.</span>`;
+    } else {
+      msgEl.textContent = reason || "Your account is not authorized to access DocuLoom. Please contact your system administrator.";
+    }
+  }
+  if (modal) {
+    modal.hidden = false;
+    modal.style.zIndex = "10005";
+  }
+  if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+}
+
+function closeAccessDeniedModal() {
+  window._accessDeniedShown = false;
+  const modal = document.getElementById("access-denied-modal");
+  if (modal) modal.hidden = true;
+}
+
 function openAdminModal() {
   if (!isAdminUser()) {
     openLoginModal("Admin login required");
@@ -355,6 +440,13 @@ function openAdminModal() {
 }
 
 const ADMIN_DEFAULT_MODEL = "gemini-3.6-flash";
+const DEFAULT_MODEL_CATALOG = [
+  "gemini-3.6-flash",
+  "gemini-3.1-pro-preview",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+];
 
 function updateAdminUsersSummary(users) {
   const list = Array.isArray(users) ? users : [];
@@ -386,25 +478,37 @@ async function loadAdminUsers() {
   const tbody = document.getElementById("admin-users-body");
   const catalogEl = document.getElementById("admin-model-catalog");
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="6">Loading…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="8">Loading…</td></tr>`;
   try {
     const resp = await fetch(`${apiBase()}/api/admin/users`, { headers: getAuthHeaders() });
     const data = await resp.json().catch(() => ([]));
     if (!resp.ok) {
       const detail = typeof data.detail === "string" ? data.detail : (data.detail || `HTTP ${resp.status}`);
       if (handleAuthFailure(detail)) {
-        tbody.innerHTML = `<tr><td colspan="6">Sign in required</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8">Sign in required</td></tr>`;
         updateAdminUsersSummary([]);
         return;
       }
       throw new Error(detail);
     }
-    const catalog = authState.modelCatalog || [];
+    const catalog = (Array.isArray(authState.modelCatalog) && authState.modelCatalog.length)
+      ? authState.modelCatalog
+      : DEFAULT_MODEL_CATALOG;
     if (catalogEl) {
       catalogEl.textContent = catalog.join(", ") || "—";
     }
     renderAdminCreateModelFields(catalog);
     updateAdminUsersSummary(data);
+
+    // Extract approvers for dropdowns
+    const approvers = data.filter(u => u.role === "approver" || u.role === "admin");
+    const createApproverSelect = document.getElementById("admin-create-approver");
+    if (createApproverSelect) {
+      const prevVal = createApproverSelect.value;
+      createApproverSelect.innerHTML = `<option value="">-- None (Unassigned) --</option>` + approvers.map(a => `<option value="${escapeAuthHtml(a.email)}">${escapeAuthHtml(a.display_name || a.email)} (${escapeAuthHtml(a.role)})</option>`).join("");
+      if (prevVal) createApproverSelect.value = prevVal;
+    }
+
     tbody.innerHTML = data.map(u => {
       const allowed = Array.isArray(u.allowed_models) && u.allowed_models.length
         ? u.allowed_models
@@ -412,15 +516,34 @@ async function loadAdminUsers() {
       const preferred = allowed.includes(u.preferred_model)
         ? u.preferred_model
         : (allowed[0] || ADMIN_DEFAULT_MODEL);
+      const isEditor = u.role === "editor" || u.role === "user";
+      const assigned = String(u.assigned_approver || "").trim().toLowerCase();
+
       return `
       <tr data-user-id="${escapeAuthHtml(u.id)}">
         <td>
           <div class="admin-cell-stack">
-            <span class="admin-cell-primary">${escapeAuthHtml(u.email)}</span>
-            <span class="admin-cell-sub">${escapeAuthHtml(u.display_name || "")}</span>
+            <span class="admin-cell-primary">${escapeAuthHtml(u.display_name || "")}</span>
+            <span class="admin-cell-sub">${escapeAuthHtml(u.email)}</span>
           </div>
         </td>
-        <td><span class="admin-pill">${escapeAuthHtml(u.role)}</span></td>
+        <td>
+          <select class="settings-select admin-role-select" data-field="role" title="User Role" style="padding: 0.25rem 0.5rem; font-size: 0.78rem; min-width: 95px;">
+            <option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option>
+            <option value="approver" ${u.role === "approver" ? "selected" : ""}>Approver</option>
+            <option value="editor" ${isEditor ? "selected" : ""}>Editor</option>
+            <option value="viewer" ${u.role === "viewer" ? "selected" : ""}>Viewer</option>
+          </select>
+        </td>
+        <td>
+          <select class="settings-select admin-approver-select" data-field="assigned_approver" title="Assigned Approver" style="padding: 0.25rem 0.5rem; font-size: 0.78rem; min-width: 140px;" ${!isEditor ? "disabled" : ""}>
+            <option value="">-- None --</option>
+            ${approvers.map(a => `<option value="${escapeAuthHtml(a.email)}" ${assigned === a.email.toLowerCase() ? "selected" : ""}>${escapeAuthHtml(a.display_name || a.email)}</option>`).join("")}
+          </select>
+        </td>
+        <td>
+          <input type="text" class="settings-input admin-sp-folder-input" data-field="sp-folder" value="${escapeAuthHtml(u.sharepoint_folder || '')}" placeholder="Default Library" style="padding: 0.25rem 0.5rem; font-size: 0.78rem; max-width: 140px;" title="Assigned SharePoint Folder or Item ID">
+        </td>
         <td>${escapeAuthHtml(u.status)}</td>
         <td>
           <div class="admin-cell-stack">
@@ -441,15 +564,17 @@ async function loadAdminUsers() {
           </div>
         </td>
         <td class="admin-actions">
-          <button type="button" class="btn btn-secondary admin-save-btn">Save</button>
-          <button type="button" class="btn btn-secondary admin-toggle-btn">${u.status === "disabled" ? "Enable" : "Disable"}</button>
+          <div class="admin-actions-row">
+            <button type="button" class="btn btn-secondary admin-save-btn">Save</button>
+            <button type="button" class="btn btn-secondary admin-toggle-btn">${u.status === "disabled" ? "Enable" : "Disable"}</button>
+          </div>
         </td>
       </tr>`;
-    }).join("") || `<tr><td colspan="6">No users</td></tr>`;
+    }).join("") || `<tr><td colspan="8">No users</td></tr>`;
     tbody.querySelectorAll("[data-role='model-policy']").forEach((el) => syncDirectoryRowModelUi(el.closest("tr")));
     if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="6">${escapeAuthHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8">${escapeAuthHtml(err.message)}</td></tr>`;
     updateAdminUsersSummary([]);
   }
 }
@@ -465,6 +590,40 @@ function formatAuditStatusLabel(status) {
   const s = String(status || "").toLowerCase();
   if (s === "done") return "pass";
   return status || "—";
+}
+
+function auditStatusPillClass(status) {
+  const s = String(status || "").toLowerCase();
+  if (s === "done") return "admin-pill admin-pill-ok";
+  if (s === "error") return "admin-pill admin-pill-bad";
+  return "admin-pill";
+}
+
+function formatAuditUserName(row) {
+  const name = String(row?.user_name || "").trim();
+  if (name) return name;
+  const email = String(row?.user_email || "").trim();
+  if (!email || email.toLowerCase() === "anonymous") return email || "—";
+  return email.includes("@") ? email.split("@")[0] : email;
+}
+
+function normalizeUserFilterQuery(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function rowMatchesUserNameFilter(row, query) {
+  const q = normalizeUserFilterQuery(query);
+  if (!q) return true;
+  const name = normalizeUserFilterQuery(formatAuditUserName(row));
+  const email = String(row?.user_email || "").trim().toLowerCase();
+  const local = email.includes("@") ? email.split("@")[0] : email;
+  // Match full query, or every token (so "global admin" matches "Global Admin")
+  if (name.includes(q) || local.includes(q) || email.includes(q)) return true;
+  const tokens = q.split(" ").filter(Boolean);
+  if (tokens.length > 1) {
+    return tokens.every((t) => name.includes(t) || local.includes(t) || email.includes(t));
+  }
+  return false;
 }
 
 function formatAuditWhen(iso) {
@@ -497,12 +656,6 @@ async function loadAdminMonitoring() {
   const grid = document.getElementById("admin-monitor-grid");
   if (!grid) return;
 
-  const lastErr = document.getElementById("mon-last-error");
-  if (lastErr) {
-    lastErr.hidden = true;
-    lastErr.textContent = "";
-  }
-
   // API health
   try {
     const controller = new AbortController();
@@ -519,8 +672,16 @@ async function loadAdminMonitoring() {
       ok ? `v${data.version || "—"}` : "Cannot reach API",
       ok ? (busy ? "warn" : "ok") : "bad"
     );
+    setMonitorTile(
+      "ops-queue",
+      "ops-queue-meta",
+      ok ? (busy ? "Busy" : "Ready") : "Down",
+      ok ? "Extract worker" : "API unreachable",
+      ok ? (busy ? "warn" : "ok") : "bad"
+    );
   } catch (_) {
     setMonitorTile("mon-api-status", "mon-api-meta", "Down", "Cannot reach API", "bad");
+    setMonitorTile("ops-queue", "ops-queue-meta", "Down", "API unreachable", "bad");
   }
 
   // Recent extract summary (unfiltered window)
@@ -593,17 +754,129 @@ async function loadAdminMonitoring() {
       lowScore === 0 ? "ok" : lowScore <= 2 ? "warn" : "bad"
     );
 
-    if (errors.length && lastErr) {
-      const latest = errors[0];
-      lastErr.hidden = false;
-      lastErr.textContent =
-        `Latest failure: ${latest.filename || "document"} · ${latest.user_email || "anonymous"} · ` +
-        `${formatAuditWhen(latest.created_at)}` +
-        (latest.error ? ` — ${String(latest.error).slice(0, 180)}` : "");
-    }
+    // App ops tiles from same window
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const failDay = errors.filter((r) => {
+      const t = Date.parse(r.created_at || r.finished_at || "");
+      return Number.isFinite(t) && t >= dayAgo;
+    }).length;
+    const rows = items.reduce(
+      (sum, r) =>
+        sum +
+        (Number(r.maintenance_count) || 0) +
+        (Number(r.spare_parts_count) || 0) +
+        (Number(r.troubleshooting_count) || 0),
+      0
+    );
+    const modelCounts = {};
+    items.forEach((r) => {
+      const key = String(r.gemini_model || r.engine || "").trim() || "—";
+      modelCounts[key] = (modelCounts[key] || 0) + 1;
+    });
+    const topModel = Object.entries(modelCounts).sort((a, b) => b[1] - a[1])[0];
+
+    setMonitorTile(
+      "ops-fail-day",
+      "ops-fail-day-meta",
+      String(failDay),
+      "UTC last 24h",
+      failDay === 0 ? "ok" : failDay <= 2 ? "warn" : "bad"
+    );
+    setMonitorTile(
+      "ops-rows",
+      "ops-rows-meta",
+      String(rows),
+      total ? `from ${total} runs` : "No runs yet",
+      "neutral"
+    );
+    setMonitorTile(
+      "ops-model",
+      "ops-model-meta",
+      topModel ? topModel[0] : "—",
+      topModel ? `${topModel[1]} runs` : "No runs yet",
+      "neutral"
+    );
   } catch (err) {
     setMonitorTile("mon-runs", "mon-runs-meta", "—", err.message || "Failed to load", "bad");
+    setMonitorTile("ops-fail-day", "ops-fail-day-meta", "—", "Failed to load", "bad");
+    setMonitorTile("ops-rows", "ops-rows-meta", "—", "Failed to load", "bad");
+    setMonitorTile("ops-model", "ops-model-meta", "—", "Failed to load", "bad");
   }
+
+  // Active users
+  try {
+    const resp = await fetch(`${apiBase()}/api/admin/users`, { headers: getAuthHeaders() });
+    const data = await resp.json().catch(() => ([]));
+    if (resp.ok && Array.isArray(data)) {
+      const active = data.filter((u) => String(u.status || "").toLowerCase() === "active").length;
+      setMonitorTile(
+        "ops-users",
+        "ops-users-meta",
+        String(active),
+        `${data.length} total`,
+        active > 0 ? "ok" : "warn"
+      );
+    } else {
+      setMonitorTile("ops-users", "ops-users-meta", "—", "Unavailable", "neutral");
+    }
+  } catch (_) {
+    setMonitorTile("ops-users", "ops-users-meta", "—", "Unavailable", "neutral");
+  }
+
+  // AWS / ops status
+  try {
+    const resp = await fetch(`${apiBase()}/api/admin/ops-status`, { headers: getAuthHeaders() });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const errDetail = typeof data.detail === "string" ? data.detail : `HTTP ${resp.status}`;
+      if (handleAuthFailure(errDetail)) return;
+      throw new Error(errDetail);
+    }
+    const applyOps = (tileKey, valueId, metaId) => {
+      const tile = data[tileKey] || {};
+      setMonitorTile(
+        valueId,
+        metaId,
+        tile.value || "—",
+        tile.meta || tile.detail || "—",
+        tile.tone || (tile.ok === false ? "warn" : "neutral")
+      );
+      const card = document.getElementById(valueId)?.closest(".stat-card");
+      if (card && tile.detail) card.title = tile.detail;
+    };
+    applyOps("ecs", "ops-ecs", "ops-ecs-meta");
+    applyOps("cpu", "ops-cpu", "ops-cpu-meta");
+    applyOps("memory", "ops-memory", "ops-memory-meta");
+    applyOps("alb", "ops-alb", "ops-alb-meta");
+    applyOps("audit_s3", "ops-s3", "ops-s3-meta");
+    setMonitorTile(
+      "ops-region",
+      "ops-region-meta",
+      data.region || "—",
+      data.region ? "AWS region" : "Not set",
+      data.region ? "neutral" : "warn"
+    );
+  } catch (err) {
+    ["ops-ecs", "ops-cpu", "ops-memory", "ops-alb", "ops-s3", "ops-region"].forEach((id) => {
+      setMonitorTile(id, `${id}-meta`, "—", err.message || "Unavailable", "warn");
+    });
+  }
+
+  if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+}
+
+function refreshAdminCurrentView() {
+  const active = document.querySelector(".admin-nav-btn.active")?.getAttribute("data-admin-view") || "monitor";
+  if (active === "users") {
+    loadAdminUsers();
+    return;
+  }
+  if (active === "logs") {
+    loadAdminExtractLogs();
+    loadAdminMonitoring();
+    return;
+  }
+  loadAdminMonitoring();
 }
 
 function updateAdminLogsSummary(items) {
@@ -633,56 +906,118 @@ function updateAdminLogsSummary(items) {
 async function loadAdminExtractLogs() {
   const tbody = document.getElementById("admin-logs-body");
   const detail = document.getElementById("admin-logs-detail");
+  const overlay = document.getElementById("admin-logs-progress-overlay");
+  const pTag = document.getElementById("admin-logs-overlay-tag");
+  const pTitle = document.getElementById("admin-logs-progress-title");
+  const pStatus = document.getElementById("admin-logs-progress-status");
+  const pFill = document.getElementById("admin-logs-progress-fill");
+
   if (!tbody) return;
   if (detail) {
     detail.hidden = true;
     detail.textContent = "";
   }
-  tbody.innerHTML = `<tr><td colspan="8">Loading…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="9">Loading…</td></tr>`;
+
+  if (overlay) {
+    overlay.classList.add("active");
+    if (pTag) pTag.innerText = "PROCESSING";
+    if (pTitle) pTitle.innerText = "Fetching Fabric Logs";
+    if (pStatus) pStatus.innerText = "Querying Microsoft Fabric WH_IDP extraction logs…";
+    if (pFill) pFill.style.width = "35%";
+  }
+
   const status = document.getElementById("admin-logs-status")?.value || "";
-  const email = document.getElementById("admin-logs-email")?.value?.trim() || "";
-  const qs = new URLSearchParams({ limit: "50" });
+  const userName = document.getElementById("admin-logs-user")?.value || "";
+  const hasUserFilter = Boolean(normalizeUserFilterQuery(userName));
+  const qs = new URLSearchParams({ limit: hasUserFilter ? "200" : "50" });
   if (status) qs.set("status", status);
-  if (email) qs.set("user_email", email);
+  if (hasUserFilter) qs.set("user_name", userName.trim());
+  qs.set("_t", String(Date.now()));
+
   try {
-    const resp = await fetch(`${apiBase()}/api/admin/extract-logs?${qs}`, { headers: getAuthHeaders() });
+    const headers = typeof getAuthHeaders === "function" ? getAuthHeaders() : {};
+    headers["Cache-Control"] = "no-cache, no-store";
+    headers["Pragma"] = "no-cache";
+    const resp = await fetch(`${apiBase()}/api/admin/extract-logs?${qs}`, { headers, cache: "no-store" });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       const errDetail = typeof data.detail === "string" ? data.detail : (data.detail || `HTTP ${resp.status}`);
       if (handleAuthFailure(errDetail)) {
-        tbody.innerHTML = `<tr><td colspan="8">Sign in required</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9">Sign in required</td></tr>`;
         updateAdminLogsSummary([]);
         return;
       }
       throw new Error(typeof errDetail === "string" ? errDetail : JSON.stringify(errDetail));
     }
-    const items = Array.isArray(data.items) ? data.items : [];
+    let items = Array.isArray(data.items) ? data.items : [];
+    // Client-side safety net (covers stale API + typed query refinements)
+    if (hasUserFilter) {
+      items = items.filter((row) => rowMatchesUserNameFilter(row, userName));
+    }
     updateAdminLogsSummary(items);
+    if (pFill) pFill.style.width = "90%";
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="8">No extraction logs yet.</td></tr>`;
+      const emptyMsg = hasUserFilter || status
+        ? "No matching extraction logs."
+        : "No extraction logs yet.";
+      tbody.innerHTML = `<tr><td colspan="9">${emptyMsg}</td></tr>`;
       return;
     }
     tbody.innerHTML = items.map((row) => {
       const score = row.overall_score == null ? "—" : Number(row.overall_score).toFixed(1);
       const counts = `${row.maintenance_count || 0} / ${row.spare_parts_count || 0} / ${row.troubleshooting_count || 0}`;
-      const statusClass = row.status === "done" ? "admin-pill admin-pill-ok" : "admin-pill admin-pill-bad";
+      const startAt = row.started_at || row.created_at;
+      const endAt = row.finished_at || "";
+      const rawDocStatus = String(row.document_status || "Pending Review").trim();
+      const isApproved = rawDocStatus.toLowerCase() === "approved";
+      const isNeedsRev = rawDocStatus.toLowerCase() === "needs revision" || rawDocStatus.toLowerCase() === "rejected";
+      const docStatus = isApproved ? "Approved" : (isNeedsRev ? "Needs Revision" : "Pending Review");
+      const statusColor = isApproved ? "#10b981" : (isNeedsRev ? "#ef4444" : "#f59e0b");
+      const statusBg = isApproved ? "rgba(16, 185, 129, 0.12)" : (isNeedsRev ? "rgba(239, 68, 68, 0.12)" : "rgba(245, 158, 11, 0.12)");
+      const statusBorder = isApproved ? "rgba(16, 185, 129, 0.35)" : (isNeedsRev ? "rgba(239, 68, 68, 0.35)" : "rgba(245, 158, 11, 0.35)");
+
       return `
       <tr data-log-id="${escapeAuthHtml(row.id)}" class="admin-log-row" title="Click for details">
-        <td>${escapeAuthHtml(formatAuditWhen(row.created_at))}</td>
-        <td>${escapeAuthHtml(row.user_email || "—")}</td>
-        <td>${escapeAuthHtml(row.filename || "—")}</td>
+        <td>${escapeAuthHtml(formatAuditWhen(startAt))}</td>
+        <td>${escapeAuthHtml(formatAuditWhen(endAt))}</td>
+        <td title="${escapeAuthHtml(row.user_email || "")}">${escapeAuthHtml(formatAuditUserName(row))}</td>
+        <td>
+          <div style="font-weight: 500;">${escapeAuthHtml(row.filename || "—")}</div>
+          <span style="display:inline-block; font-size: 0.74rem; font-weight: 500; padding: 0.1rem 0.45rem; border-radius: 4px; background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; margin-top: 0.25rem;">
+            ${escapeAuthHtml(docStatus)}
+          </span>
+        </td>
         <td><div>${escapeAuthHtml(row.engine || "—")}</div><div class="admin-muted">${escapeAuthHtml(row.parse_strategy || "")}</div></td>
         <td>${escapeAuthHtml(String(score))}</td>
         <td>${escapeAuthHtml(counts)}</td>
         <td>${escapeAuthHtml(formatAuditDuration(row.duration_ms))}</td>
-        <td><span class="${statusClass}">${escapeAuthHtml(formatAuditStatusLabel(row.status))}</span></td>
+        <td><span class="${auditStatusPillClass(row.status)}">${escapeAuthHtml(formatAuditStatusLabel(row.status))}</span></td>
       </tr>`;
     }).join("");
     if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="8">${escapeAuthHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9">${escapeAuthHtml(err.message)}</td></tr>`;
     updateAdminLogsSummary([]);
+  } finally {
+    if (pFill) pFill.style.width = "100%";
+    if (overlay) {
+      setTimeout(() => {
+        overlay.classList.remove("active");
+        if (pFill) pFill.style.width = "0%";
+      }, 250);
+    }
   }
+}
+
+let adminLogsUserFilterTimer = null;
+
+function scheduleAdminLogsUserFilter() {
+  if (adminLogsUserFilterTimer) clearTimeout(adminLogsUserFilterTimer);
+  adminLogsUserFilterTimer = setTimeout(() => {
+    adminLogsUserFilterTimer = null;
+    loadAdminExtractLogs();
+  }, 280);
 }
 
 function utcTodayInputValue() {
@@ -695,9 +1030,17 @@ function ensureHistoryDayInput() {
   return dayInput?.value || utcTodayInputValue();
 }
 
-function updateHistorySummary(items, dayLabel) {
+function updateHistorySummary(items) {
+  const histSummary = document.getElementById("history-summary");
+  const admin = isAdminUser();
+  if (histSummary) {
+    histSummary.hidden = !admin;
+    histSummary.style.display = admin ? "" : "none";
+  }
+  if (!admin) return;
+
   const runs = items.length;
-  const done = items.filter((r) => r.status === "done").length;
+  const done = items.filter((r) => (r.status || "done") === "done").length;
   const rows = items.reduce(
     (sum, r) => sum + (Number(r.maintenance_count) || 0) + (Number(r.spare_parts_count) || 0) + (Number(r.troubleshooting_count) || 0),
     0
@@ -717,114 +1060,416 @@ function updateHistorySummary(items, dayLabel) {
   set("hist-score", avg == null ? "—" : avg.toFixed(1));
 }
 
+function openFabricExtractRun(runId, filename) {
+  const overlay = document.getElementById("history-progress-overlay");
+  const pTag = document.getElementById("history-overlay-tag");
+  const pTitle = document.getElementById("history-progress-title");
+  const pStatus = document.getElementById("history-progress-status");
+  const pFill = document.getElementById("history-progress-fill");
+  if (overlay) {
+    overlay.classList.add("active");
+    if (pTag) pTag.innerText = "PROCESSING";
+    if (pTitle) pTitle.innerText = `Processing "${filename || 'Document'}"`;
+    if (pStatus) pStatus.innerText = "Initiating document extraction…";
+    if (pFill) pFill.style.width = "35%";
+    let w = 35;
+    const timer = setInterval(() => {
+      if (w < 88) {
+        w += 14;
+        if (pFill) pFill.style.width = `${w}%`;
+      }
+    }, 150);
+  }
+  setTimeout(() => {
+    window.location.href = `index.html?fabric_run_id=${encodeURIComponent(runId)}`;
+  }, 180);
+}
+
 async function loadUserExtractHistory() {
   const tbody = document.getElementById("history-body");
   const detail = document.getElementById("history-detail");
+  const refreshBtn = document.getElementById("history-refresh-btn");
+  const overlay = document.getElementById("history-progress-overlay");
+  const pTag = document.getElementById("history-overlay-tag");
+  const pTitle = document.getElementById("history-progress-title");
+  const pStatus = document.getElementById("history-progress-status");
+  const pFill = document.getElementById("history-progress-fill");
+
   if (!tbody) return;
   if (detail) {
     detail.hidden = true;
     detail.textContent = "";
   }
-  if (!isLoggedIn()) {
-    tbody.innerHTML = `<tr><td colspan="7">Sign in to see your extracts.</td></tr>`;
-    updateHistorySummary([], "Today");
-    return;
+  if (refreshBtn) {
+    const icon = refreshBtn.querySelector("i, svg");
+    if (icon) icon.classList.add("spin");
+    refreshBtn.style.opacity = "0.75";
   }
-  tbody.innerHTML = `<tr><td colspan="7">Loading…</td></tr>`;
-  const day = ensureHistoryDayInput();
-  const status = document.getElementById("history-status")?.value || "";
-  const qs = new URLSearchParams({ limit: "100", day });
-  if (status) qs.set("status", status);
+
+  // Activate floating buffer pop-up card
+  if (overlay) {
+    overlay.classList.add("active");
+    if (pTag) pTag.innerText = "PROCESSING";
+    if (pTitle) pTitle.innerText = "Fetching Fabric Extracts";
+    if (pStatus) pStatus.innerText = "Querying Microsoft Fabric WH_IDP…";
+    if (pFill) pFill.style.width = "30%";
+  }
+
   try {
-    const resp = await fetch(`${apiBase()}/api/me/extract-history?${qs}`, { headers: getAuthHeaders() });
+    const headers = typeof getAuthHeaders === "function" ? getAuthHeaders() : {};
+    headers["Cache-Control"] = "no-cache, no-store";
+    headers["Pragma"] = "no-cache";
+    const scopeSelect = document.getElementById("history-scope-select");
+    const isAllUsers = scopeSelect && scopeSelect.value === "all";
+    const cacheBuster = `_t=${Date.now()}`;
+    const qs = isAllUsers ? `limit=100&all_users=true&${cacheBuster}` : `limit=100&${cacheBuster}`;
+    const resp = await fetch(`${apiBase()}/api/fabric/extracts?${qs}`, { headers, cache: "no-store" });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const errDetail = typeof data.detail === "string" ? data.detail : (data.detail || `HTTP ${resp.status}`);
-      if (handleAuthFailure(errDetail)) {
-        tbody.innerHTML = `<tr><td colspan="7">Sign in required</td></tr>`;
-        updateHistorySummary([], day);
+      if (resp.status === 401 || (data && data.detail === "Authentication required")) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="6" style="text-align: center; padding: 2.5rem 1rem;">
+              <p style="margin-bottom: 0.85rem; color: var(--text-muted); font-size: 0.95rem;">Please sign in to view your saved extracts from Microsoft Fabric.</p>
+              <button type="button" class="btn btn-primary" onclick="if(typeof openLoginModal==='function')openLoginModal();">Sign in</button>
+            </td>
+          </tr>`;
+        updateHistorySummary([]);
         return;
       }
+      const errDetail = typeof data.detail === "string" ? data.detail : (data.detail || `HTTP ${resp.status}`);
       throw new Error(typeof errDetail === "string" ? errDetail : JSON.stringify(errDetail));
     }
-    const items = Array.isArray(data.items) ? data.items : [];
-    updateHistorySummary(items, day);
-    if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="7">No extracts for ${escapeAuthHtml(day)}.</td></tr>`;
+    if (data && data.configured === false) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 2rem; color: var(--text-muted);">Microsoft Fabric is not configured on the API.</td></tr>`;
+      updateHistorySummary([]);
       return;
     }
+    const items = Array.isArray(data.items) ? data.items : [];
+    updateHistorySummary(items);
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 2.5rem 1rem; color: var(--text-muted);">No saved extracts in Fabric yet. Extract a PDF from the workspace first.</td></tr>`;
+      return;
+    }
+    if (pFill) pFill.style.width = "95%";
     tbody.innerHTML = items.map((row) => {
       const score = row.overall_score == null ? "—" : Number(row.overall_score).toFixed(1);
       const counts = `${row.maintenance_count || 0} / ${row.spare_parts_count || 0} / ${row.troubleshooting_count || 0}`;
-      const statusClass = row.status === "done" ? "admin-pill admin-pill-ok" : "admin-pill admin-pill-bad";
-      const model = row.gemini_model || row.engine || "—";
+      const engine = row.engine || "—";
+      const when = formatAuditWhen(row.extracted_at);
+      const runId = row.run_id || "";
+      const docSub = [row.oem_manufacturer, row.doc_title].filter(Boolean).join(" — ");
+      const rawDocStatus = String(row.document_status || "Pending Review").trim();
+      const isApproved = rawDocStatus.toLowerCase() === "approved";
+      const isNeedsRev = rawDocStatus.toLowerCase() === "needs revision" || rawDocStatus.toLowerCase() === "rejected";
+      const docStatus = isApproved ? "Approved" : (isNeedsRev ? "Needs Revision" : "Pending Review");
+      const statusColor = isApproved ? "#10b981" : (isNeedsRev ? "#ef4444" : "#f59e0b");
+      const statusBg = isApproved ? "rgba(16, 185, 129, 0.12)" : (isNeedsRev ? "rgba(239, 68, 68, 0.12)" : "rgba(245, 158, 11, 0.12)");
+      const statusBorder = isApproved ? "rgba(16, 185, 129, 0.35)" : (isNeedsRev ? "rgba(239, 68, 68, 0.35)" : "rgba(245, 158, 11, 0.35)");
+      const safeFilename = (row.filename || "Document").replace(/'/g, "\\'");
+
       return `
-      <tr data-history-id="${escapeAuthHtml(row.id)}" class="admin-log-row" title="Click for details">
-        <td>${escapeAuthHtml(formatAuditWhen(row.created_at || row.started_at))}</td>
-        <td>${escapeAuthHtml(row.filename || "—")}</td>
-        <td>${escapeAuthHtml(model)}</td>
+      <tr data-fabric-run-id="${escapeAuthHtml(runId)}" class="admin-log-row">
+        <td>${escapeAuthHtml(when)}</td>
+        <td>
+          <div style="font-weight: 500;">${escapeAuthHtml(row.filename || "—")}</div>
+          ${docSub ? `<div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.15rem;">${escapeAuthHtml(docSub)}</div>` : ""}
+          <span style="display:inline-block; font-size: 0.74rem; font-weight: 500; padding: 0.1rem 0.45rem; border-radius: 4px; background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; margin-top: 0.25rem;">
+            ${escapeAuthHtml(docStatus)}
+          </span>
+        </td>
+        <td>${escapeAuthHtml(engine)}</td>
         <td>${escapeAuthHtml(String(score))}</td>
         <td>${escapeAuthHtml(counts)}</td>
-        <td>${escapeAuthHtml(formatAuditDuration(row.duration_ms))}</td>
-        <td><span class="${statusClass}">${escapeAuthHtml(formatAuditStatusLabel(row.status))}</span></td>
+        <td>
+          <a class="btn btn-primary history-open-btn" href="index.html?fabric_run_id=${encodeURIComponent(runId)}" onclick="event.preventDefault(); openFabricExtractRun('${escapeAuthHtml(runId)}', '${safeFilename}');">Open</a>
+        </td>
       </tr>`;
     }).join("");
+    if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="7">${escapeAuthHtml(err.message)}</td></tr>`;
-    updateHistorySummary([], day);
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 2rem; color: var(--accent-red, #ef4444);">${escapeAuthHtml(err.message)}</td></tr>`;
+    updateHistorySummary([]);
+  } finally {
+    if (pFill) pFill.style.width = "100%";
+    if (overlay) {
+      setTimeout(() => {
+        overlay.classList.remove("active");
+      }, 250);
+    }
+    if (refreshBtn) {
+      const icon = refreshBtn.querySelector("i, svg");
+      if (icon) icon.classList.remove("spin");
+      refreshBtn.style.opacity = "1";
+    }
   }
 }
 
-async function showUserExtractHistoryDetail(recordId) {
-  const detail = document.getElementById("history-detail");
-  if (!detail || !recordId) return;
-  detail.hidden = false;
-  detail.textContent = "Loading details…";
-  try {
-    const resp = await fetch(`${apiBase()}/api/me/extract-history/${encodeURIComponent(recordId)}`, {
-      headers: getAuthHeaders()
-    });
-    const row = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const errDetail = typeof row.detail === "string" ? row.detail : `HTTP ${resp.status}`;
-      if (handleAuthFailure(errDetail)) return;
-      throw new Error(errDetail);
-    }
-    const warnings = Array.isArray(row.warnings) && row.warnings.length
-      ? row.warnings.join(" · ")
-      : "none";
-    const pages = row.page_start || row.page_end
-      ? `pages ${row.page_start || "?"}–${row.page_end || "?"}`
-      : `processed ${row.pages_processed || 0}/${row.pages_total || 0}`;
-    const rows = `${row.maintenance_count || 0} maint · ${row.spare_parts_count || 0} spare · ${row.troubleshooting_count || 0} trouble`;
-    detail.innerHTML = `
-      <strong>${escapeAuthHtml(row.filename || "document")}</strong>
-      · ${escapeAuthHtml(row.engine || "")}
-      · ${escapeAuthHtml(pages)}
-      · ${escapeAuthHtml(rows)}
-      · category ${escapeAuthHtml(row.equipment_category || "Default")}
-      · score ${(row.overall_score == null ? "—" : Number(row.overall_score).toFixed(1))}
-      ${row.error ? `<div class="auth-error">${escapeAuthHtml(row.error)}</div>` : ""}
-      <div class="admin-muted">Warnings: ${escapeAuthHtml(warnings)}</div>
-    `;
-  } catch (err) {
-    detail.textContent = err.message;
-  }
+function initCardDrag(cardId, handleId) {
+  const card = document.getElementById(cardId);
+  const handle = document.getElementById(handleId);
+  if (!card || !handle || handle.dataset.dragBound === "1") return;
+  handle.dataset.dragBound = "1";
+
+  let dragging = false;
+  let startX = 0, startY = 0, originLeft = 0, originTop = 0;
+
+  handle.addEventListener("pointerdown", (e) => {
+    if (!card.classList.contains("active") || (e.button != null && e.button !== 0)) return;
+    const rect = card.getBoundingClientRect();
+    card.style.left = `${rect.left}px`;
+    card.style.top = `${rect.top}px`;
+    card.style.transform = "none";
+    originLeft = rect.left;
+    originTop = rect.top;
+    startX = e.clientX;
+    startY = e.clientY;
+    dragging = true;
+    card.classList.add("is-dragging");
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+
+  const onPointerMove = (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const cardW = card.offsetWidth;
+    const cardH = card.offsetHeight;
+    const margin = 8;
+    const maxLeft = Math.max(margin, window.innerWidth - cardW - margin);
+    const maxTop = Math.max(margin, window.innerHeight - cardH - margin);
+    const nextLeft = Math.min(maxLeft, Math.max(margin, originLeft + dx));
+    const nextTop = Math.min(maxTop, Math.max(margin, originTop + dy));
+    card.style.left = `${nextLeft}px`;
+    card.style.top = `${nextTop}px`;
+  };
+
+  const onPointerUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    card.classList.remove("is-dragging");
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
+
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
 }
 
 function initUserHistoryPage() {
-  ensureHistoryDayInput();
+  initCardDrag("history-progress-overlay", "history-progress-drag-handle");
   document.getElementById("history-refresh-btn")?.addEventListener("click", loadUserExtractHistory);
-  document.getElementById("history-status")?.addEventListener("change", loadUserExtractHistory);
-  document.getElementById("history-day")?.addEventListener("change", loadUserExtractHistory);
-  document.getElementById("history-body")?.addEventListener("click", (e) => {
-    const tr = e.target.closest("tr[data-history-id]");
-    if (!tr) return;
-    showUserExtractHistoryDetail(tr.getAttribute("data-history-id"));
-  });
+  document.getElementById("history-scope-select")?.addEventListener("change", loadUserExtractHistory);
   if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
   loadUserExtractHistory();
 }
+
+function parseGraphUrlClient(url) {
+  const clean = String(url || "").trim();
+  if (!clean) return { driveId: "", folderId: "" };
+  const driveMatch = clean.match(/\/drives\/([^/?#]+)/i);
+  const itemMatch = clean.match(/\/items\/([^/?#]+)/i);
+  const driveId = driveMatch ? decodeURIComponent(driveMatch[1]) : (clean.startsWith("b!") ? clean : "");
+  const folderId = itemMatch ? decodeURIComponent(itemMatch[1]) : "";
+  return { driveId, folderId };
+}
+
+async function loadAdminSharePointConfig() {
+  const urlInput = document.getElementById("admin-sp-url-input");
+  const driveInput = document.getElementById("admin-sp-drive-input");
+  const folderInput = document.getElementById("admin-sp-folder-input");
+  const nameInput = document.getElementById("admin-sp-name-input");
+  const syncInput = document.getElementById("admin-sp-sync-input");
+  const driveStat = document.getElementById("sp-stat-drive");
+  const folderStat = document.getElementById("sp-stat-folder");
+  const folderMeta = document.getElementById("sp-stat-folder-meta");
+  const liveBadge = document.getElementById("admin-sp-live-badge");
+
+  if (!driveInput) return;
+  try {
+    const resp = await fetch(`${apiBase()}/api/admin/sharepoint/config`, { headers: getAuthHeaders() });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const cfg = data.config || {};
+
+    if (urlInput && cfg.graph_endpoint) urlInput.value = cfg.graph_endpoint;
+    if (driveInput) driveInput.value = cfg.drive_id || "";
+    if (folderInput) folderInput.value = cfg.folder_item_id || "";
+    if (nameInput) nameInput.value = cfg.folder_name || "";
+    if (syncInput) syncInput.checked = cfg.auto_sync_local_uploads !== false;
+
+    if (driveStat) driveStat.textContent = cfg.drive_id || "Not configured";
+    if (folderStat) folderStat.textContent = cfg.folder_item_id ? `Item: ${cfg.folder_item_id.slice(0, 16)}…` : "Root Library";
+    if (folderMeta) folderMeta.textContent = cfg.folder_name || "Testing Site";
+    if (liveBadge) liveBadge.textContent = cfg.folder_name || "Testing Site";
+  } catch (err) {
+    console.debug("Could not load SharePoint config:", err);
+  }
+}
+
+async function saveAdminSharePointConfig(e) {
+  if (e) e.preventDefault();
+  const urlInput = document.getElementById("admin-sp-url-input");
+  const driveInput = document.getElementById("admin-sp-drive-input");
+  const folderInput = document.getElementById("admin-sp-folder-input");
+  const nameInput = document.getElementById("admin-sp-name-input");
+  const syncInput = document.getElementById("admin-sp-sync-input");
+  const feedback = document.getElementById("admin-sp-feedback");
+
+  const payload = {
+    graph_endpoint: urlInput?.value.trim() || "",
+    drive_id: driveInput?.value.trim() || "",
+    folder_item_id: folderInput?.value.trim() || "",
+    folder_name: nameInput?.value.trim() || "Testing Site",
+    auto_sync_local_uploads: syncInput ? syncInput.checked : true,
+  };
+
+  if (feedback) {
+    feedback.hidden = false;
+    feedback.style.color = "var(--text-muted)";
+    feedback.textContent = "Saving SharePoint configuration…";
+  }
+
+  try {
+    const resp = await fetch(`${apiBase()}/api/admin/sharepoint/config`, {
+      method: "POST",
+      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    if (feedback) {
+      feedback.style.color = "#10b981";
+      feedback.textContent = "✓ Configuration saved and applied across all user roles.";
+    }
+    loadAdminSharePointConfig();
+    testAdminSharePointConfig();
+  } catch (err) {
+    if (feedback) {
+      feedback.style.color = "#ef4444";
+      feedback.textContent = `✗ Save failed: ${err.message}`;
+    }
+  }
+}
+
+async function testAdminSharePointConfig() {
+  const urlInput = document.getElementById("admin-sp-url-input");
+  const driveInput = document.getElementById("admin-sp-drive-input");
+  const folderInput = document.getElementById("admin-sp-folder-input");
+  const previewStatus = document.getElementById("admin-sp-preview-status");
+  const filesList = document.getElementById("admin-sp-files-preview-list");
+  const feedback = document.getElementById("admin-sp-feedback");
+
+  const payload = {
+    graph_endpoint: urlInput?.value.trim() || "",
+    drive_id: driveInput?.value.trim() || "",
+    folder_item_id: folderInput?.value.trim() || "",
+  };
+
+  if (previewStatus) previewStatus.innerHTML = '<span style="color: #38bdf8;">Testing connection to Microsoft Graph…</span>';
+  if (filesList) filesList.innerHTML = "";
+
+  try {
+    const resp = await fetch(`${apiBase()}/api/admin/sharepoint/test`, {
+      method: "POST",
+      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    if (previewStatus) {
+      previewStatus.innerHTML = `<span style="color: #10b981; font-weight: 500;">✓ ${escapeAuthHtml(data.message)}</span>`;
+    }
+    if (filesList && Array.isArray(data.sample_files)) {
+      if (data.sample_files.length === 0) {
+        filesList.innerHTML = '<li class="admin-muted" style="font-size: 0.82rem;">No PDFs found yet in this directory.</li>';
+      } else {
+        filesList.innerHTML = data.sample_files.map(name => `
+          <li style="font-size: 0.82rem; color: hsla(215, 20%, 85%, 1); display: flex; align-items: center; gap: 0.4rem; background: rgba(255,255,255,0.04); padding: 0.35rem 0.6rem; border-radius: 4px;">
+            <i data-lucide="file-text" style="width: 14px; height: 14px; color: var(--color-teal);"></i>
+            <span>${escapeAuthHtml(name)}</span>
+          </li>
+        `).join("");
+        if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+      }
+    }
+    if (feedback) {
+      feedback.hidden = false;
+      feedback.style.color = "#10b981";
+      feedback.textContent = `✓ Connected successfully. (${data.files_count} file(s) accessible)`;
+    }
+  } catch (err) {
+    if (previewStatus) {
+      previewStatus.innerHTML = `<span style="color: #ef4444;">✗ Connection test failed: ${escapeAuthHtml(err.message)}</span>`;
+    }
+    if (feedback) {
+      feedback.hidden = false;
+      feedback.style.color = "#ef4444";
+      feedback.textContent = `✗ Connection error: ${err.message}`;
+    }
+  }
+}
+
+function initAdminViews() {
+  initCardDrag("admin-logs-progress-overlay", "admin-logs-progress-drag-handle");
+  document.querySelectorAll(".admin-nav-btn[data-admin-view]").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      const view = btn.getAttribute("data-admin-view");
+      setAdminView(view);
+    };
+  });
+  const refreshBtn = document.getElementById("admin-nav-refresh-btn");
+  if (refreshBtn) {
+    refreshBtn.onclick = (e) => {
+      e.preventDefault();
+      const active = document.querySelector(".admin-nav-btn.active")?.getAttribute("data-admin-view") || "monitor";
+      setAdminView(active);
+    };
+  }
+
+  // SharePoint Configuration Event Handlers
+  const spForm = document.getElementById("admin-sp-form");
+  if (spForm) spForm.onsubmit = saveAdminSharePointConfig;
+
+  const spTestBtn = document.getElementById("admin-sp-test-btn");
+  if (spTestBtn) spTestBtn.onclick = testAdminSharePointConfig;
+
+  const spUrlInput = document.getElementById("admin-sp-url-input");
+  if (spUrlInput) {
+    spUrlInput.addEventListener("input", () => {
+      const parsed = parseGraphUrlClient(spUrlInput.value);
+      if (parsed.driveId) {
+        const driveIn = document.getElementById("admin-sp-drive-input");
+        if (driveIn) driveIn.value = parsed.driveId;
+      }
+      if (parsed.folderId) {
+        const folderIn = document.getElementById("admin-sp-folder-input");
+        if (folderIn) folderIn.value = parsed.folderId;
+      }
+    });
+  }
+
+  const spResetBtn = document.getElementById("admin-sp-reset-btn");
+  if (spResetBtn) {
+    spResetBtn.onclick = () => {
+      const urlInput = document.getElementById("admin-sp-url-input");
+      const folderInput = document.getElementById("admin-sp-folder-input");
+      const nameInput = document.getElementById("admin-sp-name-input");
+      if (urlInput) urlInput.value = "";
+      if (folderInput) folderInput.value = "";
+      if (nameInput) nameInput.value = "Testing Site";
+      saveAdminSharePointConfig();
+    };
+  }
+
+  const fromHash = String(window.location.hash || "").replace(/^#/, "");
+  setAdminView(fromHash || "monitor");
+}
+window.initAdminViews = initAdminViews;
 
 async function showAdminExtractLogDetail(recordId) {
   const detail = document.getElementById("admin-logs-detail");
@@ -849,7 +1494,9 @@ async function showAdminExtractLogDetail(recordId) {
       : `processed ${row.pages_processed || 0}/${row.pages_total || 0}`;
     detail.innerHTML = `
       <strong>${escapeAuthHtml(row.filename || "document")}</strong>
-      · ${escapeAuthHtml(row.user_email || "anonymous")}
+      · ${escapeAuthHtml(formatAuditUserName(row))}
+      · status: <strong style="color: ${row.document_status === 'Approved' ? 'var(--accent-green, #10b981)' : 'inherit'}">${escapeAuthHtml(row.document_status || "Pending Review")}</strong>
+      ${row.approved_by ? `· approved by ${escapeAuthHtml(row.approved_by)}` : ""}
       · ${escapeAuthHtml(row.engine || "")}
       · ${escapeAuthHtml(pages)}
       · category ${escapeAuthHtml(row.equipment_category || "Default")}
@@ -878,11 +1525,12 @@ function pickCreatePreferredModel(allowed) {
 
 function renderAdminCreateModelFields(catalog) {
   const box = document.getElementById("admin-create-allowed-box");
-  if (!catalog.length || !box) return;
-  const defaultModel = catalog.includes(ADMIN_DEFAULT_MODEL) ? ADMIN_DEFAULT_MODEL : catalog[0];
+  if (!box) return;
+  const list = (Array.isArray(catalog) && catalog.length) ? catalog : DEFAULT_MODEL_CATALOG;
+  const defaultModel = list.includes(ADMIN_DEFAULT_MODEL) ? ADMIN_DEFAULT_MODEL : list[0];
   const previouslyChecked = new Set(getCreateAllowedModels());
   if (!previouslyChecked.size && defaultModel) previouslyChecked.add(defaultModel);
-  box.innerHTML = catalog.map((m) => `
+  box.innerHTML = list.map((m) => `
     <label class="admin-check">
       <input type="checkbox" value="${escapeAuthHtml(m)}" ${previouslyChecked.has(m) ? "checked" : ""}>
       <span>${escapeAuthHtml(m)}</span>
@@ -964,30 +1612,43 @@ function escapeAuthHtml(str) {
 
 async function adminCreateUser(ev) {
   ev.preventDefault();
-  const email = document.getElementById("admin-create-email").value.trim();
-  const password = document.getElementById("admin-create-password").value;
-  const displayName = document.getElementById("admin-create-name").value.trim();
-  const limit = Number(document.getElementById("admin-create-limit").value || 5);
-  const allowed = getCreateAllowedModels();
+  const submitBtn = ev.target.querySelector("button[type='submit']");
+  const origBtnText = submitBtn ? submitBtn.textContent : "Create user";
+  const email = document.getElementById("admin-create-email")?.value.trim();
+  const displayName = document.getElementById("admin-create-name")?.value.trim();
+  const role = document.getElementById("admin-create-role")?.value || "editor";
+  const assignedApprover = document.getElementById("admin-create-approver")?.value || null;
+  const sharepointFolder = document.getElementById("admin-create-sp-folder")?.value.trim() || null;
+  const limit = Number(document.getElementById("admin-create-limit")?.value || 5);
+  let allowed = getCreateAllowedModels();
+  if (!allowed.length) {
+    allowed = [ADMIN_DEFAULT_MODEL];
+  }
   const preferred = pickCreatePreferredModel(allowed);
   const errEl = document.getElementById("admin-create-error");
-  if (errEl) errEl.textContent = "";
-  if (!allowed.length) {
-    if (errEl) errEl.textContent = "Select at least one model to allocate";
-    return;
+  if (errEl) {
+    errEl.textContent = "";
+    errEl.style.color = "#ef4444";
   }
+
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Creating user…";
+  }
+
   try {
     const resp = await fetch(`${apiBase()}/api/admin/users`, {
       method: "POST",
       headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         email,
-        password,
         display_name: displayName,
-        role: "user",
+        role: role,
         copilot_daily_limit: limit,
         preferred_model: preferred,
-        allowed_models: allowed
+        allowed_models: allowed,
+        assigned_approver: role === "editor" ? assignedApprover : null,
+        sharepoint_folder: sharepointFolder,
       })
     });
     const data = await resp.json().catch(() => ({}));
@@ -996,16 +1657,35 @@ async function adminCreateUser(ev) {
       if (handleAuthFailure(detail)) return;
       throw new Error(detail || `HTTP ${resp.status}`);
     }
-    document.getElementById("admin-create-form").reset();
-    document.getElementById("admin-create-limit").value = String(authState.defaultCopilotLimit || 5);
-    renderAdminCreateModelFields(authState.modelCatalog || []);
+    document.getElementById("admin-create-form")?.reset();
+    const limitEl = document.getElementById("admin-create-limit");
+    if (limitEl) limitEl.value = String(authState.defaultCopilotLimit || 5);
+    renderAdminCreateModelFields(authState.modelCatalog || DEFAULT_MODEL_CATALOG);
+    if (errEl) {
+      errEl.style.color = "#10b981";
+      errEl.textContent = `✓ Created user ${email} successfully.`;
+      setTimeout(() => { if (errEl.textContent.includes("✓")) errEl.textContent = ""; }, 4000);
+    }
     await loadAdminUsers();
   } catch (err) {
-    if (errEl) errEl.textContent = err.message;
+    if (errEl) {
+      errEl.style.color = "#ef4444";
+      errEl.textContent = err.message;
+    }
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = origBtnText;
+    }
   }
 }
 
 async function initAuthUi() {
+  // If access denied modal is currently showing, don't overwrite it with the login modal
+  if (window._accessDeniedShown) {
+    return;
+  }
+
   // Restore session (sessionStorage first, then localStorage)
   authState.token = getAuthToken();
   try {
@@ -1014,11 +1694,19 @@ async function initAuthUi() {
     if (raw) authState.user = JSON.parse(raw);
   } catch (e) {}
 
+  if (isSharedView()) {
+    closeLoginModal();
+    document.body.classList.add("is-shared-viewer");
+    const loginModal = document.getElementById("login-modal");
+    if (loginModal) loginModal.hidden = true;
+    return;
+  }
+
   // Sign-in landing is the first page: on the main app (which has the
   // full-screen landing), show it immediately when there is no stored session
   // so the workspace never flashes first. admin.html keeps its compact modal.
   const hasLandingPage = !!document.querySelector(".auth-landing");
-  if (hasLandingPage && !authState.token) {
+  if (hasLandingPage && !authState.token && !window._accessDeniedShown) {
     openLoginModal();
   }
 
@@ -1039,7 +1727,7 @@ async function initAuthUi() {
   applyUserPolicyToUi();
 
   if (!isLoggedIn() && (hasLandingPage || authState.authRequired)) {
-    openLoginModal(authState.authRequired ? "Sign in to use OmniParse IDP" : "");
+    openLoginModal(authState.authRequired ? "Sign in to use DocuLoom" : "");
   } else if (isLoggedIn()) {
     closeLoginModal();
   }
@@ -1096,23 +1784,36 @@ async function initAuthUi() {
   document.getElementById("login-close")?.addEventListener("click", () => {
     if (!authState.authRequired) closeLoginModal();
   });
-  document.getElementById("admin-create-form")?.addEventListener("submit", adminCreateUser);
-  document.getElementById("admin-refresh-btn")?.addEventListener("click", loadAdminUsers);
-  document.getElementById("admin-monitor-refresh-btn")?.addEventListener("click", () => {
-    loadAdminMonitoring();
-    loadAdminExtractLogs();
-  });
-  document.getElementById("admin-logs-refresh-btn")?.addEventListener("click", () => {
-    loadAdminExtractLogs();
-    loadAdminMonitoring();
-  });
-  document.getElementById("admin-logs-status")?.addEventListener("change", loadAdminExtractLogs);
-  document.getElementById("admin-logs-email")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      loadAdminExtractLogs();
+  document.getElementById("admin-create-role")?.addEventListener("change", (e) => {
+    const isEditor = e.target.value === "editor";
+    const appField = document.getElementById("admin-create-approver-field");
+    const appSelect = document.getElementById("admin-create-approver");
+    if (appField) appField.style.opacity = isEditor ? "1" : "0.5";
+    if (appSelect) {
+      appSelect.disabled = !isEditor;
+      if (!isEditor) appSelect.value = "";
     }
   });
+  document.getElementById("admin-create-form")?.addEventListener("submit", adminCreateUser);
+  document.getElementById("admin-nav-refresh-btn")?.addEventListener("click", refreshAdminCurrentView);
+  document.getElementById("admin-logs-status")?.addEventListener("change", loadAdminExtractLogs);
+  const logsUserFilter = document.getElementById("admin-logs-user");
+  if (logsUserFilter) {
+    logsUserFilter.addEventListener("input", scheduleAdminLogsUserFilter);
+    logsUserFilter.addEventListener("search", () => {
+      if (adminLogsUserFilterTimer) clearTimeout(adminLogsUserFilterTimer);
+      adminLogsUserFilterTimer = null;
+      loadAdminExtractLogs();
+    });
+    logsUserFilter.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (adminLogsUserFilterTimer) clearTimeout(adminLogsUserFilterTimer);
+        adminLogsUserFilterTimer = null;
+        loadAdminExtractLogs();
+      }
+    });
+  }
   document.getElementById("admin-logs-body")?.addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-log-id]");
     if (!tr) return;
@@ -1124,16 +1825,29 @@ async function initAuthUi() {
     if (!tr) return;
     const userId = tr.getAttribute("data-user-id");
     if (e.target.closest(".admin-save-btn")) {
+      const saveBtn = e.target.closest(".admin-save-btn");
+      const origText = saveBtn ? saveBtn.textContent : "Save";
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving…";
+      }
       try {
         const { limit, allowed, preferred } = readAdminRowModelPolicy(tr);
+        const role = tr.querySelector(".admin-role-select")?.value;
+        const approverVal = tr.querySelector(".admin-approver-select")?.value || null;
+        const spFolderVal = tr.querySelector(".admin-sp-folder-input")?.value.trim() || null;
+        const payload = {
+          copilot_daily_limit: limit,
+          preferred_model: preferred,
+          allowed_models: allowed,
+          assigned_approver: role === "editor" ? approverVal : null,
+          sharepoint_folder: spFolderVal,
+        };
+        if (role) payload.role = role;
         const resp = await fetch(`${apiBase()}/api/admin/users/${userId}`, {
           method: "PATCH",
           headers: getAuthHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            copilot_daily_limit: limit,
-            preferred_model: preferred,
-            allowed_models: allowed
-          })
+          body: JSON.stringify(payload)
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -1141,6 +1855,7 @@ async function initAuthUi() {
           if (handleAuthFailure(detail)) return;
           throw new Error(detail || `HTTP ${resp.status}`);
         }
+        if (saveBtn) saveBtn.textContent = "✓ Saved";
         await loadAdminUsers();
         if (authState.user && authState.user.id === userId) {
           await refreshMe();
@@ -1148,6 +1863,10 @@ async function initAuthUi() {
         }
       } catch (err) {
         alert(err.message);
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = origText;
+        }
       }
     }
     if (e.target.closest(".admin-toggle-btn")) {
@@ -1182,6 +1901,14 @@ async function initAuthUi() {
       // Latest allocated model becomes preferred/default.
       setDirectoryRowAllowed(tr, allowed, model);
     }
+    if (e.target.matches(".admin-role-select")) {
+      const isEditor = e.target.value === "editor";
+      const apprSel = tr.querySelector(".admin-approver-select");
+      if (apprSel) {
+        apprSel.disabled = !isEditor;
+        if (!isEditor) apprSel.value = "";
+      }
+    }
   });
 
   document.getElementById("admin-users-body")?.addEventListener("click", (e) => {
@@ -1206,13 +1933,19 @@ window.authState = authState;
 window.refreshMe = refreshMe;
 window.applyUserPolicyToUi = applyUserPolicyToUi;
 function setAdminView(view) {
-  const allowed = new Set(["monitor", "users", "logs"]);
+  const allowed = new Set(["monitor", "users", "logs", "sharepoint"]);
   const next = allowed.has(view) ? view : "monitor";
   document.querySelectorAll(".admin-nav-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.getAttribute("data-admin-view") === next);
   });
   document.querySelectorAll(".admin-view").forEach((panel) => {
-    panel.hidden = panel.getAttribute("data-admin-panel") !== next;
+    const isTarget = panel.getAttribute("data-admin-panel") === next;
+    panel.hidden = !isTarget;
+    if (isTarget) {
+      panel.style.removeProperty("display");
+    } else {
+      panel.style.display = "none";
+    }
   });
   try {
     if (window.location.hash !== `#${next}`) {
@@ -1223,19 +1956,9 @@ function setAdminView(view) {
   if (next === "monitor" && typeof loadAdminMonitoring === "function") loadAdminMonitoring();
   if (next === "users" && typeof loadAdminUsers === "function") loadAdminUsers();
   if (next === "logs" && typeof loadAdminExtractLogs === "function") loadAdminExtractLogs();
+  if (next === "sharepoint" && typeof loadAdminSharePointConfig === "function") loadAdminSharePointConfig();
 }
-
-function initAdminViews() {
-  const nav = document.querySelector(".admin-nav");
-  if (!nav) return;
-  nav.addEventListener("click", (e) => {
-    const btn = e.target.closest(".admin-nav-btn[data-admin-view]");
-    if (!btn) return;
-    setAdminView(btn.getAttribute("data-admin-view"));
-  });
-  const fromHash = String(window.location.hash || "").replace(/^#/, "");
-  setAdminView(fromHash || "monitor");
-}
+window.setAdminView = setAdminView;
 
 window.requireAuthForApi = function requireAuthForApi() {
   if (authState.authRequired && !isLoggedIn()) {
@@ -1287,6 +2010,83 @@ window.requireAuthForApi = function requireAuthForApi() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initThemeToggle();
+
+  // Handle SSO redirect return payload (index.html#sso_token=...&user=... or #auth_error=access_denied)
+  try {
+    const rawSearch = window.location.search ? window.location.search.substring(1) : "";
+    const rawHash = window.location.hash ? window.location.hash.substring(1) : "";
+    const params = new URLSearchParams(rawHash || rawSearch);
+
+    const authError = params.get("auth_error");
+    const errorEmail = params.get("email");
+    const errorReason = params.get("reason");
+    if (authError === "access_denied") {
+      clearAuthSession();
+      window.history.replaceState({}, document.title, window.location.pathname);
+      openAccessDeniedModal(errorEmail, errorReason);
+    }
+
+    const ssoToken = params.get("sso_token");
+    const ssoUserRaw = params.get("user");
+    if (ssoToken && ssoUserRaw) {
+      const ssoUser = JSON.parse(decodeURIComponent(ssoUserRaw));
+      saveAuthSession(ssoToken, ssoUser);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  } catch (err) {
+    console.error("SSO return parameter parse error:", err);
+  }
+
+  // Access Denied Modal button handlers
+  const accessCloseBtn = document.getElementById("access-denied-close-btn");
+  if (accessCloseBtn) {
+    accessCloseBtn.addEventListener("click", () => closeAccessDeniedModal());
+  }
+  const accessSwitchBtn = document.getElementById("access-denied-switch-btn");
+  if (accessSwitchBtn) {
+    accessSwitchBtn.addEventListener("click", async () => {
+      closeAccessDeniedModal();
+      clearAuthSession();
+      try {
+        const resp = await fetch(`${apiBaseUrl}/api/auth/sso/login?prompt=select_account`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.auth_url) {
+            window.location.href = data.auth_url;
+            return;
+          }
+        }
+      } catch (_) {}
+      openLoginModal();
+    });
+  }
+
+  // SSO Login button handler
+  const ssoBtn = document.getElementById("sso-login-btn");
+  if (ssoBtn) {
+    ssoBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      try {
+        const resp = await fetch(`${apiBaseUrl}/api/auth/sso/login`);
+        if (!resp.ok) {
+          const detail = await resp.json();
+          alert(detail.detail || "SSO login is not available.");
+          return;
+        }
+        const data = await resp.json();
+        if (data.auth_url) {
+          window.location.href = data.auth_url;
+        }
+      } catch (err) {
+        alert("Failed to initiate SSO login: " + (err.message || err));
+      }
+    });
+  }
+
+  if (/admin\.html$/i.test(window.location.pathname)) {
+    initAdminViews();
+  }
+
   initAuthUi().then(() => {
     if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
     if (/admin\.html$/i.test(window.location.pathname)) {

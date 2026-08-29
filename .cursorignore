@@ -1,0 +1,94 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+.env/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.Python
+*.egg
+
+# Caches
+.cache/
+**/.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+.DS_Store
+*.swp
+*.swo
+
+# Lockfiles (prefer package manifests)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+poetry.lock
+Pipfile.lock
+uv.lock
+Cargo.lock
+composer.lock
+Gemfile.lock
+
+# Build / dist
+dist/
+build/
+out/
+.next/
+.nuxt/
+.turbo/
+coverage/
+*.egg-info/
+
+# Large binaries, models, datasets
+*.bin
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npz
+*.parquet
+*.feather
+*.arrow
+*.npy
+data/datasets/
+**/models/
+**/*.pdf
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.7z
+
+# Local temp / extract artifacts
+.tmp-*/
+.tmp/
+tmp/
+*.log
+
+# Secrets (never index)
+.env
+.env.*
+!.env.example
+backend/.env
+**/credentials.json
+**/secrets/
+*.pem
+*.key
+
+# IDE / VCS noise
+.git/
+.idea/
+.vscode/
+*.sublime-*

@@ -11,7 +11,7 @@ from .prompts import build_extraction_prompt
 
 def normalize_gemini_model(model_name: str) -> str:
     name = (model_name or "").strip().replace("models/", "")
-    return name or "gemini-3.5-flash"
+    return name or "gemini-3.6-flash"
 
 
 async def run_gemini_extractor(
@@ -53,7 +53,6 @@ async def run_gemini_extractor(
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json",
-            # Dense spare catalogs often need the higher ceiling even on native text pages.
             "maxOutputTokens": 16384,
         },
     }
@@ -76,18 +75,16 @@ async def run_gemini_extractor(
                     last_error = RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
                     continue
                 if resp.status_code == 404:
-                    raise RuntimeError(
-                        f'Gemini model "{model_name}" returned 404. Pick a live model in Settings.'
-                    )
+                    raise RuntimeError(f'Gemini model "{model_name}" was not found (404).')
                 if not resp.is_success:
-                    raise RuntimeError(f"Gemini API HTTP {resp.status_code}: {resp.text[:400]}")
+                    raise RuntimeError(f"Gemini API error ({resp.status_code}): {resp.text[:400]}")
 
                 data = resp.json()
                 candidate = (data.get("candidates") or [{}])[0]
-                parts_out = (((candidate.get("content") or {}).get("parts")) or [{}])
+                parts_out = ((candidate.get("content") or {}).get("parts")) or [{}]
                 text_out = parts_out[0].get("text") if parts_out else ""
                 if not text_out:
-                    raise RuntimeError("Gemini returned no content (check API key/model name).")
+                    raise RuntimeError("Gemini returned empty candidate content.")
 
                 return process_raw_model_response(
                     text_out,
@@ -97,7 +94,7 @@ async def run_gemini_extractor(
                     source_text=text,
                     equipment_category=equipment_category,
                 )
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 last_error = err
                 if attempt >= 4:
                     break

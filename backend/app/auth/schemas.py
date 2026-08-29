@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from typing import Literal, Optional
-
 from pydantic import BaseModel, Field
 
-
-Role = Literal["admin", "user"]
+Role = Literal["admin", "approver", "editor", "viewer", "user"]
 UserStatus = Literal["active", "disabled"]
 
 
@@ -17,7 +15,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    user: "UserPublic"
+    user: UserPublic
 
 
 class UserPublic(BaseModel):
@@ -29,6 +27,8 @@ class UserPublic(BaseModel):
     copilot_daily_limit: int = 5
     preferred_model: str
     allowed_models: list[str] = Field(default_factory=list)
+    assigned_approver: Optional[str] = None
+    sharepoint_folder: Optional[str] = None
     copilot_used_today: int = 0
     copilot_remaining_today: int = 5
 
@@ -36,6 +36,8 @@ class UserPublic(BaseModel):
 class AuthStatusResponse(BaseModel):
     auth_required: bool
     login_enabled: bool = True
+    sso_enabled: bool = False
+    sso_url: Optional[str] = None
     default_copilot_limit: int
     model_catalog: list[str]
     authenticated: bool = False
@@ -44,12 +46,14 @@ class AuthStatusResponse(BaseModel):
 
 class CreateUserRequest(BaseModel):
     email: str
-    password: str
+    password: Optional[str] = None
     display_name: str = ""
-    role: Role = "user"
+    role: Role = "editor"
     copilot_daily_limit: int = 5
-    preferred_model: str
+    preferred_model: Optional[str] = None
     allowed_models: list[str] = Field(default_factory=list)
+    assigned_approver: Optional[str] = None
+    sharepoint_folder: Optional[str] = None
 
 
 class UpdateUserRequest(BaseModel):
@@ -59,6 +63,8 @@ class UpdateUserRequest(BaseModel):
     copilot_daily_limit: Optional[int] = None
     preferred_model: Optional[str] = None
     allowed_models: Optional[list[str]] = None
+    assigned_approver: Optional[str] = None
+    sharepoint_folder: Optional[str] = None
     password: Optional[str] = None
 
 

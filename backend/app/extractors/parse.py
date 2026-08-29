@@ -20,16 +20,16 @@ def sanitize_val(val: Any) -> str:
 
 @lru_cache
 def _load_manifest() -> dict[str, Any]:
-    # Prefer repo-root equipment_manifest.json (../.. from this file → backend/, then parent)
     candidates = [
         Path(__file__).resolve().parents[3] / "equipment_manifest.json",
         Path(__file__).resolve().parents[2] / "equipment_manifest.json",
+        Path(__file__).resolve().parents[1] / "equipment_manifest.json",
     ]
     for path in candidates:
         if path.is_file():
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return {}
     return {}
 
@@ -116,16 +116,27 @@ def extract_content_tokens(text: str) -> list[str]:
     return out
 
 
-def grounding_ratio(candidate_text: str, source_text: str) -> float:
-    """Continuous 0–1 grounding score from token overlap + phrase match."""
+def grounding_token_details(
+    candidate_text: str, source_text: str
+) -> tuple[float, list[str], list[str]]:
     source = str(source_text or "").lower()
     if not source.strip():
-        return 0.0
+        return 0.0, [], extract_content_tokens(candidate_text)
+    source_compact = re.sub(r"[^a-z0-9]", "", source)
+    source_spaced = re.sub(r"[^a-z0-9]+", " ", source).strip()
     tokens = extract_content_tokens(candidate_text)
     if not tokens:
-        return 0.0
+        return 0.0, [], []
 
-    matched = [t for t in tokens if t in source]
+    def _token_in_source(t: str) -> bool:
+        if t in source:
+            return True
+        if len(t) >= 4 and t in source_compact:
+            return True
+        return False
+
+    matched = [t for t in tokens if _token_in_source(t)]
+    missing = [t for t in tokens if not _token_in_source(t)]
     token_ratio = len(matched) / max(1, len(tokens))
 
     words = [w for w in re.sub(r"[^a-z0-9\s]", " ", str(candidate_text or "").lower()).split() if len(w) >= 3]
@@ -133,32 +144,32 @@ def grounding_ratio(candidate_text: str, source_text: str) -> float:
     if len(words) >= 3:
         for i in range(0, len(words) - 2):
             trigram = f"{words[i]} {words[i + 1]} {words[i + 2]}".strip()
-            if len(trigram) >= 10 and trigram in source:
+            if len(trigram) >= 10 and (trigram in source or trigram in source_spaced):
                 phrase_ok = True
                 break
     if not phrase_ok and len(words) >= 2:
         for i in range(0, len(words) - 1):
             bigram = f"{words[i]} {words[i + 1]}".strip()
-            if len(bigram) >= 12 and bigram in source:
+            if len(bigram) >= 12 and (bigram in source or bigram in source_spaced):
                 phrase_ok = True
                 break
 
-    # Phrase match is required for hard pass; fold it into a continuous score.
     phrase_component = 1.0 if phrase_ok else 0.0
     score = (token_ratio * 0.65) + (phrase_component * 0.35)
-    return round(max(0.0, min(1.0, score)), 3)
+    return round(max(0.0, min(1.0, score)), 3), matched, missing
 
 
 def is_text_grounded_in_source(candidate_text: str, source_text: str) -> bool:
-    """Boolean filter using the same thresholds as before (token + phrase)."""
     source = str(source_text or "").lower()
     if not source.strip():
         return False
+    source_compact = re.sub(r"[^a-z0-9]", "", source)
+    source_spaced = re.sub(r"[^a-z0-9]+", " ", source).strip()
     tokens = extract_content_tokens(candidate_text)
     if not tokens:
         return False
 
-    matched = [t for t in tokens if t in source]
+    matched = [t for t in tokens if t in source or (len(t) >= 4 and t in source_compact)]
     is_short = len(tokens) <= 8
     threshold = max(3, int(len(tokens) * 0.7 + 0.999)) if is_short else max(2, int(len(tokens) * 0.5 + 0.999))
     token_ok = len(matched) >= threshold
@@ -168,13 +179,13 @@ def is_text_grounded_in_source(candidate_text: str, source_text: str) -> bool:
     if len(words) >= 3:
         for i in range(0, len(words) - 2):
             trigram = f"{words[i]} {words[i + 1]} {words[i + 2]}".strip()
-            if len(trigram) >= 10 and trigram in source:
+            if len(trigram) >= 10 and (trigram in source or trigram in source_spaced):
                 phrase_ok = True
                 break
     if not phrase_ok and len(words) >= 2:
         for i in range(0, len(words) - 1):
             bigram = f"{words[i]} {words[i + 1]}".strip()
-            if len(bigram) >= 12 and bigram in source:
+            if len(bigram) >= 12 and (bigram in source or bigram in source_spaced):
                 phrase_ok = True
                 break
     return token_ok and phrase_ok
@@ -200,21 +211,70 @@ def _attach_grounding_unavailable(rows: list[dict[str, Any]]) -> None:
         row["grounding_available"] = False
 
 
-def _filter_grounded_with_scores(
-    rows: list[dict[str, Any]],
-    *,
-    source: str,
-    text_fn,
-) -> list[dict[str, Any]]:
+def _attach_grounding_scores(rows: list[dict[str, Any]], *, source: str, text_fn) -> None:
+    for row in rows:
+        candidate = text_fn(row)
+        score, _, missing = grounding_token_details(candidate, source)
+        row["grounding_score"] = score
+        row["grounding_available"] = True
+        row["_missing_from_page"] = missing[:16]
+
+
+def _filter_grounded_with_scores(rows: list[dict[str, Any]], *, source: str, text_fn) -> list[dict[str, Any]]:
     kept: list[dict[str, Any]] = []
     for row in rows:
         candidate = text_fn(row)
-        ratio = grounding_ratio(candidate, source)
+        ratio, _, missing = grounding_token_details(candidate, source)
         if is_text_grounded_in_source(candidate, source):
             row["grounding_score"] = ratio
             row["grounding_available"] = True
+            row["_missing_from_page"] = missing[:16]
             kept.append(row)
     return kept
+
+
+def _strip_vision_marker(text: str) -> str:
+    return re.sub(r"OCR\s*VISION\s*EXTRACTION", " ", str(text or ""), flags=re.I).strip()
+
+
+def _extract_page_transcription(result_json: dict[str, Any]) -> str:
+    raw = result_json.get("page_transcription") or result_json.get("ocr_text")
+    if isinstance(raw, list):
+        return "\n".join(str(x).strip() for x in raw if str(x).strip()).strip()
+    if isinstance(raw, str):
+        return raw.strip()
+    return ""
+
+
+def _synthesize_grounding_corpus_from_rows(output: dict[str, list[dict[str, Any]]]) -> str:
+    parts: list[str] = []
+    for key in ("maintenance", "spare_parts", "troubleshooting"):
+        for row in output.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            for val in row.values():
+                if isinstance(val, str):
+                    s = val.strip()
+                    if s and s.upper() != "NA" and not s.isdigit():
+                        parts.append(s)
+    return " ".join(parts).strip()
+
+
+def _build_grounding_source(
+    *,
+    source_text: str,
+    transcription: str,
+    has_image: bool,
+    row_corpus: str = "",
+) -> str:
+    native = _strip_vision_marker(source_text)
+    parts = [p for p in (native, transcription.strip(), row_corpus.strip()) if p]
+    if not parts:
+        return ""
+    merged = "\n".join(dict.fromkeys(parts))
+    if has_image and not transcription.strip() and not row_corpus.strip() and len(native) < 40:
+        return ""
+    return merged
 
 
 def is_clean_maintenance_row(row: dict[str, Any], *, equipment_category: str) -> bool:
@@ -237,10 +297,8 @@ def is_clean_spare_parts_row(row: dict[str, Any]) -> bool:
     dwg = sanitize_val(row.get("drawing_model_no"))
     if name == "NA" and code == "NA" and dwg == "NA":
         return False
-    lower_code = code.lower()
-    lower_dwg = dwg.lower()
-    has_strong_code = code != "NA" and any(ch.isdigit() for ch in code) and "na" not in lower_code
-    has_drawing_ref = dwg != "NA" and "na" not in lower_dwg
+    has_strong_code = code != "NA" and any(ch.isdigit() for ch in code) and "na" not in code.lower()
+    has_drawing_ref = dwg != "NA" and "na" not in dwg.lower()
     if looks_like_procurement_or_index_meta(name) and not has_strong_code and not has_drawing_ref:
         return False
     return True
@@ -332,20 +390,18 @@ def parse_model_json_response(raw_response_text: str) -> dict[str, Any]:
         candidates.append(first)
     if clean and clean not in candidates:
         candidates.append(clean)
-    repaired: list[str] = []
     for c in list(candidates):
         fixed = repair_truncated_json(c)
-        if fixed and fixed not in candidates and fixed not in repaired:
-            repaired.append(fixed)
-    candidates.extend(repaired)
+        if fixed and fixed not in candidates:
+            candidates.append(fixed)
 
     last_err: Exception | None = None
     for candidate in candidates:
         try:
             return json.loads(candidate)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             last_err = err
-    raise last_err or ValueError("Unable to parse model JSON response")
+    raise last_err or ValueError("Unable to parse model JSON response.")
 
 
 def process_raw_model_response(
@@ -465,63 +521,53 @@ def process_raw_model_response(
     ]
     output["spare_parts"] = [r for r in output["spare_parts"] if is_clean_spare_parts_row(r)]
     output["troubleshooting"] = [
-        r
-        for r in output["troubleshooting"]
-        if r.get("problem") != "NA"
-        and r.get("root_cause_solution") != "NA"
+        r for r in output["troubleshooting"]
+        if r.get("problem") != "NA" and r.get("root_cause_solution") != "NA"
         and len(str(r.get("problem") or "")) > 5
         and len(str(r.get("root_cause_solution") or "")) > 5
-        and "..." not in str(r.get("problem") or "").lower()
-        and ". . ." not in str(r.get("problem") or "").lower()
     ]
 
     grounding_available = False
-    if not has_image:
-        source = str(source_text or "")
-        if source.strip():
-            grounding_available = True
-            output["maintenance"] = _filter_grounded_with_scores(
-                output["maintenance"],
-                source=source,
-                text_fn=lambda r: _maintenance_grounding_text(r, equipment_category=equipment_category),
-            )
-            output["spare_parts"] = _filter_grounded_with_scores(
-                output["spare_parts"],
-                source=source,
-                text_fn=_spare_grounding_text,
-            )
-            output["troubleshooting"] = _filter_grounded_with_scores(
-                output["troubleshooting"],
-                source=source,
-                text_fn=_trouble_grounding_text,
-            )
+    transcription = _extract_page_transcription(result_json if isinstance(result_json, dict) else {})
+    row_corpus = ""
+    if has_image and not transcription.strip():
+        row_corpus = _synthesize_grounding_corpus_from_rows(output)
+    source = _build_grounding_source(
+        source_text=str(source_text or ""),
+        transcription=transcription,
+        has_image=has_image,
+        row_corpus=row_corpus,
+    )
+    maint_text_fn = lambda r: _maintenance_grounding_text(r, equipment_category=equipment_category)
+
+    if source.strip():
+        grounding_available = True
+        if has_image:
+            _attach_grounding_scores(output["maintenance"], source=source, text_fn=maint_text_fn)
+            _attach_grounding_scores(output["spare_parts"], source=source, text_fn=_spare_grounding_text)
+            _attach_grounding_scores(output["troubleshooting"], source=source, text_fn=_trouble_grounding_text)
         else:
-            _attach_grounding_unavailable(output["maintenance"])
-            _attach_grounding_unavailable(output["spare_parts"])
-            _attach_grounding_unavailable(output["troubleshooting"])
+            output["maintenance"] = _filter_grounded_with_scores(output["maintenance"], source=source, text_fn=maint_text_fn)
+            output["spare_parts"] = _filter_grounded_with_scores(output["spare_parts"], source=source, text_fn=_spare_grounding_text)
+            output["troubleshooting"] = _filter_grounded_with_scores(output["troubleshooting"], source=source, text_fn=_trouble_grounding_text)
     else:
         _attach_grounding_unavailable(output["maintenance"])
         _attach_grounding_unavailable(output["spare_parts"])
         _attach_grounding_unavailable(output["troubleshooting"])
 
-    # Dense OEM catalog tables beside diagrams are often under-sampled by the LLM.
-    # Deterministically recover every No./Code/Name/Qty row from page text.
-    if equipment_category != "Logbook" and str(source_text or "").strip():
-        catalog_rows = extract_catalog_spare_rows(
-            source_text,
-            page_num=page_num,
-            doc_name=clean_doc_name,
-        )
+    catalog_source = source if source.strip() else _strip_vision_marker(str(source_text or ""))
+    if equipment_category != "Logbook" and catalog_source.strip():
+        catalog_rows = extract_catalog_spare_rows(catalog_source, page_num=page_num, doc_name=clean_doc_name)
         if catalog_rows:
             before_spares = len(output["spare_parts"])
             output["spare_parts"] = merge_spare_rows(output["spare_parts"], catalog_rows)
-            # Count newly recovered catalog rows toward quality stats.
             candidates_before += max(0, len(output["spare_parts"]) - before_spares)
+            if grounding_available:
+                _attach_grounding_scores(output["spare_parts"], source=source, text_fn=_spare_grounding_text)
 
     candidates_after = (
         len(output["maintenance"]) + len(output["spare_parts"]) + len(output["troubleshooting"])
     )
-    # Stamp stable within-page order for any rows still missing pdf_order.
     for i, row in enumerate(output["maintenance"], start=1):
         if not row.get("pdf_order"):
             row["pdf_order"] = i
@@ -537,5 +583,10 @@ def process_raw_model_response(
         "candidates_after": candidates_after,
         "grounding_available": grounding_available,
     }
+    output["_page_transcription"] = transcription
+    output["_page_num"] = page_num
+    output["_grounding_source"] = source[:12000] if source else ""
+    if isinstance(result_json.get("doc_metadata"), dict):
+        output["_doc_metadata"] = result_json["doc_metadata"]
 
     return output

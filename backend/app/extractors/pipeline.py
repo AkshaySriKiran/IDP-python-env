@@ -5,6 +5,7 @@ import re
 from typing import Any, Callable, Optional
 
 from ..models import (
+    DocumentMetadata,
     ExtractMeta,
     ExtractOptions,
     ExtractResponse,
@@ -14,7 +15,7 @@ from ..models import (
     SparePartRow,
     TroubleshootingRow,
 )
-from ..pdf_utils import extract_image_page, extract_pdf_pages, extract_txt_chunks
+from ..pdf_utils import convert_docx_to_pdf, extract_image_page, extract_pdf_pages, extract_txt_chunks
 from .gemini import run_gemini_extractor
 from .ollama import run_ollama_extractor
 
@@ -24,7 +25,6 @@ def _ext(filename: str) -> str:
 
 
 def _page_sort_key(row: dict[str, Any]) -> tuple:
-    """PDF reading order: page, then pdf_order / Item No. — never part name."""
     page_raw = row.get("page", "")
     page_num = 10**9
     if str(page_raw).isdigit():
@@ -68,7 +68,6 @@ def _completeness_ratio(row: dict[str, Any], fields: list[str]) -> float:
 
 def compute_maintenance_completeness(row: dict[str, Any], *, is_logbook: bool) -> float:
     if is_logbook:
-        # Required work description + optional attended_by / date
         required = 1.0 if _field_filled(row.get("maintenance_work_description")) else 0.0
         optional = [
             1.0 if _field_filled(row.get("attended_by")) else 0.0,
@@ -97,10 +96,78 @@ def compute_troubleshooting_completeness(row: dict[str, Any]) -> float:
     )
 
 
+def _missing_fields(row: dict[str, Any], fields: list[str]) -> list[str]:
+    return [f for f in fields if not _field_filled(row.get(f))]
+
+
+def build_quality_reasons(
+    row: dict[str, Any],
+    *,
+    completeness: float,
+    grounding: float,
+    grounding_available: bool,
+    registry: str,
+    is_logbook: bool,
+) -> list[str]:
+    reasons: list[str] = []
+
+    if completeness >= 0.85:
+        reasons.append("Completeness OK")
+    elif completeness >= 0.5:
+        reasons.append("Some required fields incomplete")
+    else:
+        reasons.append("Many required fields missing")
+
+    if registry == "maintenance":
+        if is_logbook:
+            missing = _missing_fields(row, ["maintenance_work_description", "attended_by", "date"])
+        else:
+            missing = _missing_fields(
+                row,
+                ["equipment_title", "subsystem_component", "maintenance_routine", "checks_instructions"],
+            )
+    elif registry == "spare_parts":
+        missing = _missing_fields(row, ["equipment_title", "part_name"])
+        if not any(_field_filled(row.get(f)) for f in ("part_number_code", "item_no", "drawing_model_no")):
+            missing.append("part_number_or_drawing")
+    else:
+        missing = _missing_fields(
+            row,
+            ["equipment_title", "subsystem_component", "problem", "root_cause_solution"],
+        )
+
+    for field in missing[:4]:
+        label = field.replace("_", " ")
+        reasons.append(f"Missing: {label}")
+
+    if not grounding_available:
+        reasons.append("OCR page — confirm in PDF (letter-match not available)")
+    elif grounding >= 0.70:
+        reasons.append("Grounded in source page")
+    elif grounding >= 0.40:
+        reasons.append("Weak match to source page")
+    else:
+        reasons.append("Poor match to source page")
+
+    missing_words = [str(w).strip() for w in (row.get("_missing_from_page") or []) if str(w).strip()]
+    if grounding_available and missing_words:
+        reasons.append("AI words missing from page: " + ", ".join(missing_words[:10]))
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in reasons:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
 def score_row_confidence(
     row: dict[str, Any],
     *,
     completeness: float,
+    registry: str = "maintenance",
+    is_logbook: bool = False,
 ) -> tuple[float, RowQuality]:
     grounding_available = bool(row.get("grounding_available", False))
     raw_g = row.get("grounding_score")
@@ -113,11 +180,23 @@ def score_row_confidence(
     if grounding_available:
         confidence = (0.5 * grounding) + (0.5 * completeness)
     else:
-        # OCR / vision pages: grounding often unavailable — weight completeness.
-        confidence = (0.2 * grounding) + (0.8 * completeness)
+        confidence = completeness
 
     confidence = round(max(0.0, min(1.0, confidence)), 3)
-    quality = RowQuality(grounding_score=round(grounding, 3), completeness_score=completeness)
+    reasons = build_quality_reasons(
+        row,
+        completeness=completeness,
+        grounding=grounding,
+        grounding_available=grounding_available,
+        registry=registry,
+        is_logbook=is_logbook,
+    )
+    quality = RowQuality(
+        grounding_score=round(grounding, 3),
+        completeness_score=completeness,
+        grounding_available=grounding_available,
+        reasons=reasons,
+    )
     return confidence, quality
 
 
@@ -130,17 +209,23 @@ def apply_row_scores(
 ) -> None:
     for row in maintenance:
         completeness = compute_maintenance_completeness(row, is_logbook=is_logbook)
-        conf, quality = score_row_confidence(row, completeness=completeness)
+        conf, quality = score_row_confidence(
+            row, completeness=completeness, registry="maintenance", is_logbook=is_logbook
+        )
         row["confidence"] = conf
         row["quality"] = quality
     for row in spare_parts:
         completeness = compute_spare_completeness(row)
-        conf, quality = score_row_confidence(row, completeness=completeness)
+        conf, quality = score_row_confidence(
+            row, completeness=completeness, registry="spare_parts", is_logbook=False
+        )
         row["confidence"] = conf
         row["quality"] = quality
     for row in troubleshooting:
         completeness = compute_troubleshooting_completeness(row)
-        conf, quality = score_row_confidence(row, completeness=completeness)
+        conf, quality = score_row_confidence(
+            row, completeness=completeness, registry="troubleshooting", is_logbook=False
+        )
         row["confidence"] = conf
         row["quality"] = quality
 
@@ -212,7 +297,6 @@ def compute_run_quality_meta(
 
 
 def _row_for_model(row: dict[str, Any]) -> dict[str, Any]:
-    """Copy row fields suitable for Pydantic models (drop internal scoring keys)."""
     out = {k: v for k, v in row.items() if not k.startswith("_") and k not in {"grounding_available", "grounding_score"}}
     quality = out.get("quality")
     if isinstance(quality, RowQuality):
@@ -281,12 +365,15 @@ async def extract_document(
     candidates_before_total = 0
     is_logbook = (options.equipment_category or "").strip() == "Logbook"
 
-    if ext == "pdf":
-        # History cards are scanned photos; always OCR + auto-rotate sideways pages.
+    if ext in {"pdf", "docx", "doc"}:
+        pdf_bytes = file_bytes
+        if ext in {"docx", "doc"}:
+            pdf_bytes = await asyncio.to_thread(convert_docx_to_pdf, file_bytes)
+
         effective_strategy = "ocr" if is_logbook else options.parse_strategy
         page_payloads = await asyncio.to_thread(
             extract_pdf_pages,
-            file_bytes,
+            pdf_bytes,
             parse_strategy=effective_strategy,
             page_start=options.page_start,
             page_end=options.page_end,
@@ -296,8 +383,7 @@ async def extract_document(
 
         if len(page_payloads) >= MAX_PDF_PAGES and not options.page_end:
             warnings.append(
-                f"Page limit is {MAX_PDF_PAGES}. Processed {len(page_payloads)} page(s); "
-                f"set a From/To range if you need a different slice."
+                f"Page processing bounded at {MAX_PDF_PAGES} pages. Processed {len(page_payloads)} page(s)."
             )
     elif ext == "txt":
         text = file_bytes.decode("utf-8", errors="replace")
@@ -306,8 +392,8 @@ async def extract_document(
         page_payloads = [extract_image_page(file_bytes, filename)]
     else:
         raise ValueError(
-            f"Unsupported file type for Python API: .{ext or 'unknown'}. "
-            "Use PDF, TXT, JPG, or PNG (Word/DOCX still works via the in-browser extractor)."
+            f"Unsupported file type: .{ext or 'unknown'}. "
+            "Supported formats: PDF, Word (.docx, .doc), TXT, JPG, PNG."
         )
 
     if not page_payloads:
@@ -320,42 +406,18 @@ async def extract_document(
                 filename=filename,
                 engine=options.engine,
                 parse_strategy=options.parse_strategy,
-                warnings=["No pages found in document."],
+                warnings=["No extractable content found in document."],
                 overall_score=0.0,
-                grounding_pass_rate=0.0,
-                filter_drop_rate=0.0,
-                low_confidence_count=0,
             ),
         )
 
     for p in page_payloads:
-        # Truncate stored page text so a huge-page response stays browser-safe.
         text = p.text or ""
-        if len(text) > 3000:
-            text = text[:3000] + "…"
+        if len(text) > 8000:
+            text = text[:8000] + "…"
         pages_out.append(PageText(pageNum=p.page_num, text=text))
 
-    # Process EVERY page — no TOC / keyword skipping.
     llm_payloads = list(page_payloads)
-
-    if not llm_payloads:
-        return ExtractResponse(
-            maintenance=[],
-            spare_parts=[],
-            troubleshooting=[],
-            pages=pages_out,
-            meta=ExtractMeta(
-                filename=filename,
-                engine=f"{options.engine}:{options.gemini_model if options.engine == 'gemini' else options.ollama_model}",
-                parse_strategy=options.parse_strategy,
-                pages_total=len(page_payloads),
-                pages_processed=0,
-                warnings=warnings + ["No pages found to process."],
-                overall_score=0.0,
-            ),
-        )
-
-    # Higher concurrency for full-book Gemini runs (still rate-limit friendly).
     concurrency = 8 if options.engine == "gemini" else 1
     sem = asyncio.Semaphore(concurrency)
     processed = 0
@@ -370,6 +432,7 @@ async def extract_document(
                 "maintenance": [],
                 "spare_parts": [],
                 "troubleshooting": [],
+                "_page_num": payload.page_num,
                 "_quality_stats": {
                     "candidates_before": 0,
                     "candidates_after": 0,
@@ -386,30 +449,55 @@ async def extract_document(
                     image_b64=payload.image_b64,
                     mime_type=payload.mime_type,
                 )
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 warnings.append(f"Page {payload.page_num}: {err}")
                 result = {
                     "maintenance": [],
                     "spare_parts": [],
                     "troubleshooting": [],
+                    "_page_num": payload.page_num,
                     "_quality_stats": {
                         "candidates_before": 0,
                         "candidates_after": 0,
                         "grounding_available": False,
                     },
                 }
+            if isinstance(result, dict):
+                result.setdefault("_page_num", payload.page_num)
             processed += 1
             if on_progress:
                 on_progress(f"Processed page {processed}/{total}", processed / total)
             return result
 
     results = await asyncio.gather(*[worker(p) for p in llm_payloads])
+    page_text_by_num = {p.pageNum: (p.text or "") for p in pages_out}
     for result in results:
         stats = result.get("_quality_stats") or {}
         candidates_before_total += int(stats.get("candidates_before") or 0)
         all_maint.extend(result.get("maintenance") or [])
         all_spares.extend(result.get("spare_parts") or [])
         all_trouble.extend(result.get("troubleshooting") or [])
+
+        page_num = result.get("_page_num")
+        transcription = (result.get("_page_transcription") or "").strip()
+        grounding_source = (result.get("_grounding_source") or "").strip()
+        if page_num is None:
+            continue
+        merged = grounding_source or transcription
+        if not merged:
+            continue
+        existing = page_text_by_num.get(int(page_num), "")
+        existing_clean = re.sub(r"OCR\s*VISION\s*EXTRACTION", " ", existing or "", flags=re.I).strip()
+        if existing_clean and existing_clean not in merged:
+            merged = f"{existing_clean}\n{merged}".strip()
+        if len(merged) > 8000:
+            merged = merged[:8000] + "…"
+        page_text_by_num[int(page_num)] = merged
+
+    pages_out = [
+        PageText(pageNum=p.pageNum, text=page_text_by_num.get(p.pageNum, p.text or ""))
+        for p in pages_out
+    ]
 
     all_maint.sort(key=_page_sort_key)
     all_spares.sort(key=_page_sort_key)
@@ -430,6 +518,28 @@ async def extract_document(
         pages_processed=processed,
     )
 
+    aggregated_doc_meta = {
+        "title": "NA",
+        "oem_manufacturer": "NA",
+        "equipment_model": "NA",
+        "equipment_type": "NA",
+        "document_version": "NA",
+        "publication_date": "NA",
+    }
+    clean_doc_name = filename.rsplit(".", 1)[0] if "." in filename else filename
+    aggregated_doc_meta["title"] = clean_doc_name
+
+    for result in results:
+        meta_cand = result.get("_doc_metadata")
+        if isinstance(meta_cand, dict):
+            for k in aggregated_doc_meta:
+                v = str(meta_cand.get(k) or "").strip()
+                if v and v.upper() not in {"NA", "N/A", "NONE", "NULL", "UNDEFINED"}:
+                    if aggregated_doc_meta[k] in {"NA", clean_doc_name} or len(v) > len(aggregated_doc_meta[k]):
+                        aggregated_doc_meta[k] = v
+
+    doc_metadata_obj = DocumentMetadata(**aggregated_doc_meta)
+
     return ExtractResponse(
         maintenance=[MaintenanceRow(**_row_for_model(row)) for row in all_maint],
         spare_parts=[SparePartRow(**_row_for_model(row)) for row in all_spares],
@@ -449,5 +559,7 @@ async def extract_document(
             grounding_pass_rate=quality_meta["grounding_pass_rate"],
             filter_drop_rate=quality_meta["filter_drop_rate"],
             low_confidence_count=quality_meta["low_confidence_count"],
+            doc_metadata=doc_metadata_obj,
+            document_status="Pending Review",
         ),
     )

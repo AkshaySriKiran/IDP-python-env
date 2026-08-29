@@ -6,13 +6,17 @@ from functools import lru_cache
 from pathlib import Path
 
 
-DATA_DIR = Path(os.getenv("OMNIPARSE_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+def _env(key: str, default: str = "") -> str:
+    return (os.getenv(key) or default).strip().strip('"').strip("'")
+
+
+DATA_DIR = Path(_env("OMNIPARSE_DATA_DIR") or (Path(__file__).resolve().parents[2] / "data"))
 USERS_FILE = DATA_DIR / "users.json"
 JWT_SECRET_FILE = DATA_DIR / ".jwt_secret"
 
-DEFAULT_COPILOT_LIMIT = int(os.getenv("DEFAULT_COPILOT_LIMIT", "5"))
-MAX_COPILOT_LIMIT = int(os.getenv("MAX_COPILOT_LIMIT", "100"))
-JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "12"))
+DEFAULT_COPILOT_LIMIT = int(_env("DEFAULT_COPILOT_LIMIT", "5"))
+MAX_COPILOT_LIMIT = int(_env("MAX_COPILOT_LIMIT", "100"))
+JWT_EXPIRE_HOURS = int(_env("JWT_EXPIRE_HOURS", "12"))
 
 # Catalog of models Global Admin may assign to users (Gemini pilot).
 # Pro: only current text Pro IDs from the live Gemini API (no image/TTS variants).
@@ -27,19 +31,19 @@ DEFAULT_MODEL_CATALOG = [
 
 
 def auth_required() -> bool:
-    return os.getenv("AUTH_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return _env("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
 
 
 def model_catalog() -> list[str]:
-    raw = os.getenv("MODEL_CATALOG", "").strip()
+    raw = _env("MODEL_CATALOG")
     if raw:
-        return [m.strip() for m in raw.split(",") if m.strip()]
+        return [m.strip().strip('"').strip("'") for m in raw.split(",") if m.strip()]
     return list(DEFAULT_MODEL_CATALOG)
 
 
 @lru_cache
 def jwt_secret() -> str:
-    env = os.getenv("JWT_SECRET", "").strip()
+    env = _env("JWT_SECRET")
     if env:
         return env
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,8 +59,8 @@ def jwt_secret() -> str:
 
 
 def global_admin_email() -> str:
-    return os.getenv("GLOBAL_ADMIN_EMAIL", "admin@omniparse.local").strip().lower()
+    return _env("GLOBAL_ADMIN_EMAIL", "admin@omniparse.local").lower()
 
 
 def global_admin_password() -> str:
-    return os.getenv("GLOBAL_ADMIN_PASSWORD", "ChangeMeNow!").strip()
+    return _env("GLOBAL_ADMIN_PASSWORD", "ChangeMeNow!")

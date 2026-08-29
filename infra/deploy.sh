@@ -145,27 +145,34 @@ aws ecs update-service \
 
 if [[ -n "$GEMINI_API_KEY" ]]; then
   echo "==> Updating Secrets Manager Gemini key..."
-  SECRET_JSON="$(python3 -c "import json,os; print(json.dumps({'GEMINI_API_KEY':os.environ['GEMINI_API_KEY'],'GEMINI_MODEL':os.environ.get('GEMINI_MODEL','gemini-3.5-flash')}))")"
+  aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > /tmp/cur_secret.json 2>/dev/null || echo "{}" > /tmp/cur_secret.json
+  SECRET_JSON="$(python3 -c "import json,os; d=json.load(open('/tmp/cur_secret.json')) if os.path.exists('/tmp/cur_secret.json') else {}; d['GEMINI_API_KEY']=os.environ['GEMINI_API_KEY']; d['GEMINI_MODEL']=os.environ.get('GEMINI_MODEL','gemini-3.6-flash'); print(json.dumps(d))")"
   aws secretsmanager put-secret-value \
     --secret-id "$SECRET_ARN" \
     --secret-string "$SECRET_JSON" \
     >/dev/null
+  rm -f /tmp/cur_secret.json
 fi
 
 # ----- 4) Sync UI + invalidate -----
 echo "==> Syncing UI to s3://$UI_BUCKET ..."
-# Keep existing Secrets Manager Gemini key: do not pass empty GEMINI_API_KEY on deploy.
+# Static assets
 aws s3 sync "$ROOT" "s3://$UI_BUCKET" \
   --exclude "*" \
-  --include "index.html" \
-  --include "admin.html" \
-  --include "history.html" \
   --include "app.js" \
   --include "auth-admin.js" \
   --include "styles.css" \
   --include "equipment_manifest.json" \
   --include "assets/*" \
   --cache-control "public,max-age=60"
+
+# HTML files (no-cache so browser immediately loads latest HTML)
+aws s3 sync "$ROOT" "s3://$UI_BUCKET" \
+  --exclude "*" \
+  --include "index.html" \
+  --include "admin.html" \
+  --include "history.html" \
+  --cache-control "no-cache, no-store, must-revalidate"
 
 if [[ -n "$DIST_ID" && "$DIST_ID" != "None" ]]; then
   echo "==> Invalidating CloudFront $DIST_ID ..."

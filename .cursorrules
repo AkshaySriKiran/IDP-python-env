@@ -1,0 +1,25 @@
+# OmniParse IDP — token efficiency
+
+## Before reading code
+1. Read `.cursor/context_cache.md` first; use Memory MCP (`search_nodes` / `open_nodes`) for architecture.
+2. Do **not** dump whole files or scan the full tree unless the task requires it.
+3. Prefer: Grep for symbols → Read **line ranges / signatures** only → edit with compact diffs.
+4. Skip ignored paths (`.cursorignore`): venvs, caches, lockfiles, PDFs, `.tmp-*`, secrets.
+
+## Diff & edits
+- Change only what the task needs; no drive-by refactors or unrelated files.
+- Prefer `StrReplace` / surgical edits over rewriting large files.
+- Do not commit secrets (`backend/.env`, tokens). Do not undo user-local changes unless fixing a requested bug.
+
+## Memory MCP (required after meaningful discoveries)
+After learning durable architecture facts, update the graph:
+- `create_entities` / `create_relations` for new components and links
+- `add_observations` for new facts on existing entities
+Keep names stable (e.g. `OmniParseIDP`, `FastAPIBackend`, `FabricWH_IDP`).
+Also refresh `.cursor/context_cache.md` when contracts or key paths change (keep under ~120 lines).
+
+## Product anchors (do not rediscover)
+- UI `:8000` static HTML/JS; API `:8001` FastAPI under `backend/app/`.
+- Extract → Maintenance / Spare Parts / Troubleshooting; Fabric cache by `content_hash`.
+- Intake: SharePoint (`sharepoint_item_id`) and/or local upload per current UI; see context cache.
+- Never invent new architecture; extend existing patterns in `main.py`, `pipeline.py`, integrations.

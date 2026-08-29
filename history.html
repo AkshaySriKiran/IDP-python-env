@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IDP — My extracts</title>
+  <title>DocuLoom — My extracts</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=80">
+  <link rel="stylesheet" href="styles.css?v=118">
   <script>
     (function () {
       try {
@@ -29,17 +29,16 @@
     <header class="app-header">
       <div class="header-logo">
         <div class="logo-icon">
-          <img src="assets/idp-logo.png" alt="IDP logo" class="logo-image" width="42" height="50">
+          <img src="assets/idp-logo.png" alt="DocuLoom logo" class="logo-image" width="42" height="50">
         </div>
         <div class="logo-text">
-          <h1>IDP</h1>
+          <h1>DocuLoom</h1>
           <p>My extracts</p>
         </div>
       </div>
       <div class="header-status">
-        <a class="btn btn-secondary auth-header-btn" href="index.html">
+        <a class="btn btn-secondary auth-header-btn auth-back-btn" href="index.html" title="Back to app" aria-label="Back to app">
           <i data-lucide="arrow-left"></i>
-          <span>Back to app</span>
         </a>
         <button type="button" class="theme-toggle-btn" id="theme-toggle-btn" title="Switch theme" aria-label="Toggle light and dark mode">
           <i data-lucide="sun" class="theme-icon-sun"></i>
@@ -75,7 +74,7 @@
       </div>
     </header>
 
-    <div class="stats-grid history-stats-grid" id="history-summary">
+    <div class="stats-grid history-stats-grid" id="history-summary" hidden>
       <div class="stat-card">
         <div class="stat-icon-wrapper blue-glow"><i data-lucide="file-stack"></i></div>
         <div class="stat-info">
@@ -106,47 +105,57 @@
       </div>
     </div>
 
-    <section class="admin-page-card glass-card">
+    <section class="admin-page-card glass-card admin-view">
       <div class="admin-section-head">
         <div>
-          <h2>My extracts</h2>
+          <h2>Previous extracts</h2>
         </div>
-        <div class="history-toolbar">
-          <input type="date" id="history-day" class="settings-input history-toolbar-control" title="Day (UTC)">
-          <select id="history-status" class="settings-select history-toolbar-control" title="Filter by status">
-            <option value="">All statuses</option>
-            <option value="done">pass</option>
-            <option value="error">error</option>
-          </select>
-          <button type="button" class="btn btn-secondary history-toolbar-control" id="history-refresh-btn">
+        <div class="history-toolbar" style="display: flex; align-items: center; gap: 0.5rem;">
+          <div id="history-admin-scope-wrap" style="display: none; align-items: center; gap: 0.35rem;">
+            <label for="history-scope-select" style="font-size: 0.8rem; color: var(--text-muted); font-weight: 500;">Scope:</label>
+            <select id="history-scope-select" class="settings-input" style="padding: 0.25rem 0.6rem; font-size: 0.82rem; height: 32px; border-radius: 6px;">
+              <option value="mine" selected>My extracts</option>
+              <option value="all">All users (Admin)</option>
+            </select>
+          </div>
+          <button type="button" class="btn btn-secondary history-toolbar-control toolbar-icon-btn" id="history-refresh-btn" title="Refresh extracts from Fabric" aria-label="Refresh">
             <i data-lucide="refresh-cw"></i>
-            <span>Refresh</span>
           </button>
         </div>
       </div>
 
-      <div class="admin-table-wrap" style="padding-top:0.5rem;">
+      <div class="admin-table-wrap admin-logs-scroll">
         <table class="data-table admin-logs-table">
           <thead>
             <tr>
               <th>When</th>
               <th>Manual</th>
-              <th>Model</th>
+              <th>Engine</th>
               <th>Score</th>
               <th>M / S / T</th>
-              <th>Duration</th>
-              <th>Status</th>
+              <th style="text-align: right; width: 85px;"></th>
             </tr>
           </thead>
-          <tbody id="history-body">
-            <tr><td colspan="7">Sign in to see your extracts.</td></tr>
-          </tbody>
+          <tbody id="history-body"></tbody>
         </table>
         <p id="history-detail" class="admin-muted admin-logs-detail" hidden></p>
       </div>
-    </section>
 
-    <footer class="app-page-footer">AI-generated output. Engineer review recommended prior to use</footer>
+      <div class="grid-footer" style="margin-top: auto; border-top: 1px solid var(--border-glass); padding: 0.55rem 1.25rem; display: flex; align-items: center; justify-content: center; border-radius: 0 0 16px 16px; background: hsla(220, 40%, 6%, 0.15);">
+        <p class="grid-disclaimer" style="position: static; transform: none; margin: 0; font-size: 0.78rem; color: hsla(215, 10%, 45%, 0.9); line-height: 1.3; text-align: center;">AI-generated output. Engineer review recommended prior to use</p>
+      </div>
+    </section>
+  </div>
+
+  <!-- Floating Buffer Pop-up Card (same as Front Page) -->
+  <div class="progress-overlay" id="history-progress-overlay" role="status" aria-live="polite">
+    <div class="progress-drag-handle" id="history-progress-drag-handle" title="Drag to move">
+      <span class="progress-drag-grip" aria-hidden="true"></span>
+      <span id="history-overlay-tag">PROCESSING</span>
+    </div>
+    <div class="spinner"></div>
+    <h4 id="history-progress-title">Fetching Fabric Extracts</h4>
+    <p class="progress-subtext" id="history-progress-status">Querying WH_IDP warehouse logs…</p>
   </div>
 
   <div id="login-modal" class="auth-modal" hidden>
@@ -168,6 +177,6 @@
       if (typeof lucide !== 'undefined') lucide.createIcons();
     });
   </script>
-  <script src="auth-admin.js?v=35"></script>
+  <script src="auth-admin.js?v=52"></script>
 </body>
 </html>

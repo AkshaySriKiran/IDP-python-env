@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IDP Presentation — Intelligent Document Processing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-page: #f5f5f5;
+      --canvas: #ffffff;
+      --line: #e5e5e5;
+      --line-dark: #111111;
+      
+      --text-black: #111111;
+      --text-heavy: #262626;
+      --text-muted: #737373;
+      --text-subtle: #a3a3a3;
+
+      /* Distinct Semantic Color Palette */
+      --color-rose: #e11d48;
+      --color-violet: #7c3aed;
+      --color-teal: #0d9488;
+      --color-emerald: #059669;
+      --color-amber: #d97706;
+      --color-cyan: #0284c7;
+      --color-indigo: #4f46e5;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-page);
+      color: var(--text-black);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      overflow-x: hidden;
+    }
+
+    /* Swiss Architectural Frame */
+    .deck-container {
+      position: relative;
+      width: 100%;
+      max-width: 1220px;
+      aspect-ratio: 16 / 9;
+      background: var(--canvas);
+      border: 1px solid var(--line-dark);
+      box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .slide {
+      display: none;
+      flex: 1;
+      padding: 36px 48px 24px 48px;
+      flex-direction: column;
+      justify-content: space-between;
+      background: #ffffff;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 0.35s ease, transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .slide.active {
+      display: flex;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Clean Editorial Staggered Animations */
+    .slide.active .anim-fade-up {
+      animation: editorialFade 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    .slide.active .delay-1 { animation-delay: 0.04s; }
+    .slide.active .delay-2 { animation-delay: 0.09s; }
+    .slide.active .delay-3 { animation-delay: 0.15s; }
+    .slide.active .delay-4 { animation-delay: 0.22s; }
+
+    @keyframes editorialFade {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Typography & Micro Labels */
+    .micro-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .editorial-title {
+      font-size: 26px;
+      font-weight: 800;
+      color: var(--text-black);
+      letter-spacing: -0.8px;
+      line-height: 1.15;
+    }
+
+    .editorial-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .hairline-divider {
+      width: 100%;
+      height: 1px;
+      background: var(--line);
+      margin: 16px 0;
+    }
+
+    .hairline-divider.dark {
+      background: var(--line-dark);
+      height: 1.5px;
+    }
+
+    /* Grid Layouts without rounded cards */
+    .editorial-grid-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0;
+      flex: 1;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .editorial-col {
+      padding: 18px 24px;
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .editorial-col:last-child {
+      border-right: none;
+    }
+
+    .editorial-col:first-child {
+      padding-left: 0;
+    }
+
+    .col-accent-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 48px;
+      height: 3px;
+    }
+    .editorial-col:first-child .col-accent-bar {
+      left: 0;
+    }
+
+    .editorial-grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      flex: 1;
+      border-top: 1px solid var(--line);
+    }
+
+    .editorial-grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0;
+      flex: 1;
+      border-top: 1px solid var(--line);
+    }
+
+    .editorial-grid-4 .editorial-col {
+      padding: 16px 18px;
+    }
+    .editorial-grid-4 .editorial-col:first-child {
+      padding-left: 0;
+    }
+
+    .col-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .col-heading {
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--text-black);
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+
+    .editorial-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .editorial-list li {
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--text-muted);
+      position: relative;
+    }
+
+    .editorial-list li strong {
+      color: var(--text-black);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      margin-bottom: 1px;
+    }
+
+    .item-icon {
+      font-size: 11.5px;
+      display: inline-block;
+    }
+
+    /* HORIZONTAL ARCHITECTURAL TIMELINE */
+    .timeline-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 12px 0;
+      margin-bottom: 16px;
+    }
+
+    .timeline-step {
+      padding: 0 16px;
+      border-right: 1px solid var(--line);
+      position: relative;
+    }
+    .timeline-step:first-child { padding-left: 0; }
+    .timeline-step:last-child { border-right: none; }
+
+    .step-top-line {
+      position: absolute;
+      top: -12px;
+      left: 0;
+      width: 32px;
+      height: 2.5px;
+    }
+    .timeline-step:first-child .step-top-line { left: 0; }
+
+    .step-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9.5px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .step-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: var(--text-black);
+      margin: 2px 0 1px 0;
+    }
+
+    .step-desc {
+      font-size: 9.5px;
+      color: var(--text-muted);
+    }
+
+    /* Footer Meta */
+    .slide-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    /* Controls Bar */
+    .deck-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      max-width: 1220px;
+      margin-top: 16px;
+      padding: 0 8px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .nav-btn-group {
+      display: flex;
+      gap: 10px;
+    }
+
+    .btn {
+      background: #ffffff;
+      color: var(--text-black);
+      border: 1px solid #111111;
+      padding: 8px 18px;
+      border-radius: 4px;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .btn:hover {
+      background: #111111;
+      color: #ffffff;
+    }
+
+    .notes-drawer {
+      width: 100%;
+      max-width: 1220px;
+      background: #ffffff;
+      border: 1px solid var(--line-dark);
+      border-radius: 4px;
+      padding: 16px 22px;
+      margin-top: 14px;
+      color: var(--text-heavy);
+      font-size: 13px;
+      line-height: 1.6;
+      display: none;
+    }
+
+    .notes-drawer.open {
+      display: block;
+    }
+
+    .notes-header {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      color: var(--text-black);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.8px;
+    }
+
+    @media print {
+      body { background: transparent; padding: 0; }
+      .deck-controls, .notes-drawer { display: none !important; }
+      .deck-container { aspect-ratio: auto; box-shadow: none; border-radius: 0; border: none; }
+      .slide { display: flex !important; page-break-after: always; height: 100vh; padding: 30px; opacity: 1 !important; transform: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Main Slide Deck Frame -->
+  <div class="deck-container">
+
+    <!-- ================= SLIDE 1: EDITORIAL TITLE COVER ================= -->
+    <div class="slide active" id="slide-1" style="justify-content: space-between;">
+      <div>
+        <div class="micro-label anim-fade-up delay-1" style="color: var(--color-violet);">✦  SYSTEM SPECIFICATION & ARCHITECTURE  //  2026</div>
+        <h1 class="anim-fade-up delay-2" style="font-size: 46px; font-weight: 800; color: var(--text-black); line-height: 1.08; letter-spacing: -1.5px; margin: 12px 0 20px 0;">
+          Intelligent Document<br>Processing (IDP)
+        </h1>
+        <div class="hairline-divider dark anim-fade-up delay-2"></div>
+      </div>
+
+      <div class="anim-fade-up delay-3" style="display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; flex: 1; align-items: start; padding-top: 8px;">
+        <!-- Left Column: Core Statement -->
+        <div>
+          <div style="font-size: 16px; font-weight: 800; color: var(--text-black); line-height: 1.4; margin-bottom: 12px;">
+            Transforming Complex Technical & Engineering Documents into Actionable Structured Intelligence
+          </div>
+          <p style="font-size: 12.5px; line-height: 1.65; color: var(--text-muted);">
+            An enterprise AI platform engineered to eliminate manual transcription bottlenecks from massive O&M manuals, vendor spare parts catalogs (RSPL), engineering schematics, and handwritten shift logs.
+          </p>
+        </div>
+
+        <!-- Right Column: Capabilities -->
+        <div style="border-left: 1px solid var(--line); padding-left: 36px; display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <div style="font-size: 12px; font-weight: 800; color: var(--color-violet);">⚡ 01 // DUAL-STREAM INGESTION</div>
+            <div style="font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">Sub-second native PDF text stream & adaptive 300-DPI multimodal OCR vision.</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; font-weight: 800; color: var(--color-teal);">⚙ 02 // DOMAIN-TARGETED SCHEMAS</div>
+            <div style="font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">Direct extraction of maintenance schedules, spare parts catalogs, and troubleshooting trees.</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; font-weight: 800; color: var(--color-indigo);">☁ 03 // AWS CLOUD ARCHITECTURE</div>
+            <div style="font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">Serverless auto-scaling ECS Fargate containers, KMS-encrypted S3, and audit grounding.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <div>INTELLIGENT DOCUMENT PROCESSING (IDP)</div>
+        <div>SYSTEM SPECIFICATION • 01 / 06</div>
+      </div>
+    </div>
+
+    <!-- ================= SLIDE 2: USE CASE & JOURNEY ================= -->
+    <div class="slide" id="slide-2">
+      <div>
+        <div class="micro-label anim-fade-up delay-1" style="color: var(--color-rose);">01 // OPERATIONAL CONTEXT & PROBLEM SPACE</div>
+        <h2 class="editorial-title anim-fade-up delay-2">From Complex Unstructured Manuals to Actionable Data</h2>
+        <p class="editorial-subtitle anim-fade-up delay-2">Solving critical operational bottlenecks in industrial maintenance and technical documentation</p>
+      </div>
+
+      <div class="editorial-grid-3 anim-fade-up delay-3" style="margin-top: 14px;">
+        <!-- Col 1: Rose -->
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-rose);"></div>
+          <div class="col-num" style="color: var(--color-rose);">01 // THE BOTTLENECK</div>
+          <div class="col-heading">Manual Transcription</div>
+          <ul class="editorial-list">
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-rose);">⚠️</span> Massive Manuals</strong>
+              200–500+ page PDFs required days of manual review.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-rose);">⚠️</span> High Error Rates</strong>
+              Typos in complex part codes and inspection intervals.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-rose);">⚠️</span> Format Silos</strong>
+              Varied, non-standard layouts across equipment vendors.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-rose);">⚠️</span> ERP Disconnect</strong>
+              Critical maintenance knowledge trapped in static PDF files.
+            </li>
+          </ul>
+        </div>
+
+        <!-- Col 2: Teal -->
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-teal);"></div>
+          <div class="col-num" style="color: var(--color-teal);">02 // THE SOLUTION</div>
+          <div class="col-heading">Targeted AI Extraction</div>
+          <ul class="editorial-list">
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">⚙</span> Maintenance Tasks</strong>
+              Routines (Daily/Monthly/Annual) & instruction steps.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">⚙</span> Spare Parts (RSPL)</strong>
+              Item names, numbers, drawing codes & quantities.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">⚙</span> Troubleshooting</strong>
+              Identifies symptoms, probable causes & verified fixes.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">⚙</span> Schema Normalization</strong>
+              Auto-mapped to unified equipment taxonomies.
+            </li>
+          </ul>
+        </div>
+
+        <!-- Col 3: Emerald -->
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-emerald);"></div>
+          <div class="col-num" style="color: var(--color-emerald);">03 // BUSINESS VALUE</div>
+          <div class="col-heading">Operational Impact</div>
+          <ul class="editorial-list">
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-emerald);">✓</span> 90%+ Turnaround Boost</strong>
+              Near-instant transformation from PDF to structured data.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-emerald);">✓</span> Page-Level Grounding</strong>
+              Every extracted row is mapped to its exact source page.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-emerald);">✓</span> Direct Sync & Export</strong>
+              One-click export to multi-tab Excel workbooks & databases.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-emerald);">✓</span> Human-in-the-Loop</strong>
+              Integrated editor and verification workflow for QA.
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <div>INTELLIGENT DOCUMENT PROCESSING (IDP)</div>
+        <div>OPERATIONAL CONTEXT • 02 / 06</div>
+      </div>
+    </div>
+
+    <!-- ================= SLIDE 3: WORKING OF APP ================= -->
+    <div class="slide" id="slide-3">
+      <div>
+        <div class="micro-label anim-fade-up delay-1" style="color: var(--color-indigo);">02 // SYSTEM ARCHITECTURE & INGESTION PIPELINE</div>
+        <h2 class="editorial-title anim-fade-up delay-2">How the App Works: From Heuristics to an AI-First Layer</h2>
+        <p class="editorial-subtitle anim-fade-up delay-2">Adaptive dual-stream processing for both clean digital PDFs and degraded/handwritten scans</p>
+      </div>
+
+      <div class="anim-fade-up delay-2" style="border-top: 1px solid var(--line-dark); border-bottom: 1px solid var(--line); padding: 10px 0; margin: 12px 0;">
+        <div class="micro-label" style="margin-bottom: 2px; color: var(--color-amber);">PARADIGM EVOLUTION // MOVING BEYOND FRAGILE HEURISTICS</div>
+        <div style="font-size: 11.5px; color: var(--text-black); font-weight: 600; line-height: 1.45;">
+          • <span style="color: var(--color-rose);">⚠️ Previously:</span> Brittle regex and fixed coordinate parsers broke whenever vendor table formats changed.<br>
+          • <span style="color: var(--color-emerald);">✓ Now:</span> Multimodal AI understands layout semantics, reads rotated text, and reliably reconstructs complex tables.
+        </div>
+      </div>
+
+      <div class="editorial-grid-2 anim-fade-up delay-3">
+        <!-- Stream 1 -->
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-violet);"></div>
+          <div class="col-num" style="color: var(--color-violet);">STREAM 01 // NATIVE DIGITAL PDFs</div>
+          <div class="col-heading">High-Speed Digital Text Stream</div>
+          <ul class="editorial-list">
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> Direct Text Parsing</strong>
+              Extracts digital font glyphs and embedded tables directly via PyMuPDF/pypdf.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> Zero OCR Overhead</strong>
+              Eliminates rasterization latency for blazing-fast token processing.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> Batch Chunking</strong>
+              Intelligently handles 500+ page manuals with rolling context windowing.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> LLM Structuring</strong>
+              Transforms raw text streams into strict O&M JSON schemas.
+            </li>
+          </ul>
+        </div>
+
+        <!-- Stream 2 -->
+        <div class="editorial-col" style="padding-left: 24px; padding-right: 0;">
+          <div class="col-accent-bar" style="background: var(--color-teal); left: 24px;"></div>
+          <div class="col-num" style="color: var(--color-teal);">STREAM 02 // SCANNED & HANDWRITTEN</div>
+          <div class="col-heading">Multimodal Vision & Adaptive OCR</div>
+          <ul class="editorial-list">
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> High-DPI Rasterization</strong>
+              Renders crystal-clear page tiles with auto-rotation angle detection.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> Vision AI Reasoning</strong>
+              Multimodal LLMs decipher handwriting, stamps, and complex catalog drawings.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> Adaptive Auto-Switching</strong>
+              Automatically routes only image-heavy pages to vision to optimize cost.
+            </li>
+            <li>
+              <strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> Token Grounding Layer</strong>
+              Verifies AI structured fields against raw source tokens for zero hallucination.
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <div>INTELLIGENT DOCUMENT PROCESSING (IDP)</div>
+        <div>DUAL-STREAM PIPELINE • 03 / 06</div>
+      </div>
+    </div>
+
+    <!-- ================= SLIDE 4: CORE TECHNOLOGY STACK ================= -->
+    <div class="slide" id="slide-4">
+      <div>
+        <div class="micro-label anim-fade-up delay-1" style="color: var(--color-violet);">03 // TECHNOLOGY STACK & SYSTEM PIPELINE</div>
+        <h2 class="editorial-title anim-fade-up delay-2">Core Technology Stack & System Execution Flow</h2>
+        <p class="editorial-subtitle anim-fade-up delay-2">High-concurrency backend services, multimodal LLM orchestration, and high-fidelity parsing</p>
+      </div>
+
+      <!-- TOP: Horizontal Timeline with Color-Coded Steps -->
+      <div class="timeline-strip anim-fade-up delay-2">
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-violet);"></div>
+          <div class="step-num" style="color: var(--color-violet);">📄 STAGE 01 //</div>
+          <div class="step-title">INTAKE</div>
+          <div class="step-desc">PDF / SharePoint Intake</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-indigo);"></div>
+          <div class="step-num" style="color: var(--color-indigo);">⚡ STAGE 02 //</div>
+          <div class="step-title">ASYNC QUEUE</div>
+          <div class="step-desc">FastAPI Worker Queue</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-teal);"></div>
+          <div class="step-num" style="color: var(--color-teal);">⚙ STAGE 03 //</div>
+          <div class="step-title">PARSE & OCR</div>
+          <div class="step-desc">PyMuPDF Text Stream</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-emerald);"></div>
+          <div class="step-num" style="color: var(--color-emerald);">👁️ STAGE 04 //</div>
+          <div class="step-title">AI EXTRACT</div>
+          <div class="step-desc">Gemini 2.5 Vision Structuring</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-amber);"></div>
+          <div class="step-num" style="color: var(--color-amber);">✓ STAGE 05 //</div>
+          <div class="step-title">VALIDATE</div>
+          <div class="step-desc">Grounding Sync & Export</div>
+        </div>
+      </div>
+
+      <!-- BOTTOM: 4-Column Color-Differentiated Matrix -->
+      <div class="editorial-grid-4 anim-fade-up delay-3">
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-violet);"></div>
+          <div class="col-num" style="color: var(--color-violet);">⚡ 01 // BACKEND API</div>
+          <div class="col-heading" style="font-size: 14.5px;">Python FastAPI</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> Async Queue:</strong> Non-blocking background job queue.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> Polling Endpoints:</strong> Live REST progress updates.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-violet);">⚡</span> Pydantic v2:</strong> Strict schema validation with OpenAPI.</li>
+          </ul>
+        </div>
+
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-teal);"></div>
+          <div class="col-num" style="color: var(--color-teal);">👁️ 02 // MULTIMODAL AI</div>
+          <div class="col-heading" style="font-size: 14.5px;">Gemini 2.5 Vision</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> Visual Reasoning:</strong> Reads complex tabular hierarchies.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> Handwriting / Notes:</strong> Deciphers scans and field logs.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-teal);">👁️</span> Local Fallback:</strong> Optional Ollama LLM execution.</li>
+          </ul>
+        </div>
+
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-emerald);"></div>
+          <div class="col-num" style="color: var(--color-emerald);">⚙ 03 // PARSING ENGINE</div>
+          <div class="col-heading" style="font-size: 14.5px;">PyMuPDF (fitz)</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-emerald);">⚙</span> Sub-Second Parsing:</strong> Fast digital glyph extraction.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-emerald);">⚙</span> 300-DPI Rasterizer:</strong> Clean tiles with auto-rotation.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-emerald);">⚙</span> Zero Latency:</strong> Bypasses OCR when text exists.</li>
+          </ul>
+        </div>
+
+        <div class="editorial-col" style="border-right: none; padding-right: 0;">
+          <div class="col-accent-bar" style="background: var(--color-amber);"></div>
+          <div class="col-num" style="color: var(--color-amber);">📊 04 // CLIENT & EXPORT</div>
+          <div class="col-heading" style="font-size: 14.5px;">Vanilla JS & SheetJS</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-amber);">📊</span> Zero Bloat UI:</strong> Fast, lightweight responsive UI.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-amber);">📊</span> Multi-Tab Excel:</strong> Instant client-side workbook build.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-amber);">📊</span> Integrations:</strong> Hooks for Fabric & SharePoint.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <div>INTELLIGENT DOCUMENT PROCESSING (IDP)</div>
+        <div>TECH STACK & PIPELINE • 04 / 06</div>
+      </div>
+    </div>
+
+    <!-- ================= SLIDE 5: AWS CLOUD ARCHITECTURE ================= -->
+    <div class="slide" id="slide-5">
+      <div>
+        <div class="micro-label anim-fade-up delay-1" style="color: var(--color-indigo);">04 // CLOUD INFRASTRUCTURE & SCALABILITY</div>
+        <h2 class="editorial-title anim-fade-up delay-2">AWS Cloud Architecture & Deployment Pipeline</h2>
+        <p class="editorial-subtitle anim-fade-up delay-2">Enterprise-grade scalability, serverless container execution, and zero-trust security</p>
+      </div>
+
+      <!-- TOP: Horizontal Cloud Timeline -->
+      <div class="timeline-strip anim-fade-up delay-2">
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-violet);"></div>
+          <div class="step-num" style="color: var(--color-violet);">🌐 LAYER 01 //</div>
+          <div class="step-title">INGRESS</div>
+          <div class="step-desc">HTTPS TLS 1.3 Client</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-cyan);"></div>
+          <div class="step-num" style="color: var(--color-cyan);">🔀 LAYER 02 //</div>
+          <div class="step-title">TRAFFIC</div>
+          <div class="step-desc">Route 53 & ALB WAF</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-indigo);"></div>
+          <div class="step-num" style="color: var(--color-indigo);">⚙ LAYER 03 //</div>
+          <div class="step-title">COMPUTE</div>
+          <div class="step-desc">AWS ECS Fargate Fleet</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-teal);"></div>
+          <div class="step-num" style="color: var(--color-teal);">🗄️ LAYER 04 //</div>
+          <div class="step-title">STORAGE & AI</div>
+          <div class="step-desc">Amazon S3 KMS ⮀ Gemini</div>
+        </div>
+        <div class="timeline-step">
+          <div class="step-top-line" style="background: var(--color-emerald);"></div>
+          <div class="step-num" style="color: var(--color-emerald);">🚀 LAYER 05 //</div>
+          <div class="step-title">DELIVERY</div>
+          <div class="step-desc">Excel, DB & ERP Sync</div>
+        </div>
+      </div>
+
+      <!-- BOTTOM: 3 Color-Coded Cloud Architecture Pillars -->
+      <div class="editorial-grid-3 anim-fade-up delay-3">
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-indigo);"></div>
+          <div class="col-num" style="color: var(--color-indigo);">⚙ 01 // SERVERLESS COMPUTE</div>
+          <div class="col-heading">AWS ECS & Fargate</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-indigo);">⚙</span> Auto-Scaling Worker Fleet:</strong> Containers scale dynamically based on job queue volume.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-indigo);">⚙</span> Zero Server Overhead:</strong> Serverless execution eliminates OS patching management.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-indigo);">⚙</span> Sandboxed Execution:</strong> Each PDF extraction runs inside an isolated container.</li>
+          </ul>
+        </div>
+
+        <div class="editorial-col">
+          <div class="col-accent-bar" style="background: var(--color-teal);"></div>
+          <div class="col-num" style="color: var(--color-teal);">🔒 02 // STORAGE & SECURITY</div>
+          <div class="col-heading">Amazon S3 & Secrets</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-teal);">🔒</span> Encrypted Buckets:</strong> Raw PDFs, tiles, and JSON outputs encrypted via SSE-KMS.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-teal);">🔒</span> AWS Secrets Manager:</strong> Centralized API key management with automated key rotation.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-teal);">🔒</span> IAM Least-Privilege:</strong> Strict execution policies ensuring zero-trust cloud security.</li>
+          </ul>
+        </div>
+
+        <div class="editorial-col" style="padding-right: 0;">
+          <div class="col-accent-bar" style="background: var(--color-emerald);"></div>
+          <div class="col-num" style="color: var(--color-emerald);">📊 03 // ROUTING & TELEMETRY</div>
+          <div class="col-heading">ALB & CloudWatch</div>
+          <ul class="editorial-list">
+            <li><strong><span class="item-icon" style="color: var(--color-emerald);">📊</span> Application Load Balancer:</strong> SSL/TLS termination, health probes, and DDoS mitigation.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-emerald);">📊</span> Real-Time Telemetry:</strong> CloudWatch metrics for latency, error rates, and token usage.</li>
+            <li><strong><span class="item-icon" style="color: var(--color-emerald);">📊</span> Automated Health Probes:</strong> Proactive container restarts and instant alerts on failures.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <div>INTELLIGENT DOCUMENT PROCESSING (IDP)</div>
+        <div>AWS CLOUD ARCHITECTURE • 05 / 06</div>
+      </div>
+    </div>
+
+    <!-- ================= SLIDE 6: THANK YOU & DISCUSSION ================= -->
+    <div class="slide" id="slide-6" style="justify-content: space-between;">
+      <div>
+        <div class="micro-label anim-fade-up delay-1" style="color: var(--color-emerald);">✦  05 // CONCLUSION & NEXT STEPS</div>
+        <h1 class="anim-fade-up delay-2" style="font-size: 46px; font-weight: 800; color: var(--text-black); line-height: 1.08; letter-spacing: -1.5px; margin: 12px 0 6px 0;">
+          Thank You
+        </h1>
+        <div class="anim-fade-up delay-2" style="font-size: 18px; font-weight: 700; color: var(--color-teal); margin-bottom: 20px;">
+          Questions & Technical Discussion
+        </div>
+        <div class="hairline-divider dark anim-fade-up delay-2"></div>
+      </div>
+
+      <div class="anim-fade-up delay-3" style="display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; flex: 1; align-items: start; padding-top: 8px;">
+        <!-- Left Column: Core Summary -->
+        <div>
+          <div style="font-size: 16px; font-weight: 800; color: var(--text-black); line-height: 1.4; margin-bottom: 12px;">
+            Intelligent Document Processing (IDP) Platform
+          </div>
+          <p style="font-size: 12.5px; line-height: 1.65; color: var(--text-muted);">
+            Enterprise-grade pipeline designed for high-concurrency ingestion of complex O&M manuals, vendor catalogs, and handwritten shift logs into structured, verified asset data.
+          </p>
+        </div>
+
+        <!-- Right Column: Discussion Points -->
+        <div style="border-left: 1px solid var(--line); padding-left: 36px; display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <div style="font-size: 12px; font-weight: 800; color: var(--color-violet);">✦ DISCUSSION & COLLABORATION</div>
+            <div style="font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">Open for architectural questions, pilot integration, and technical deep-dives.</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; font-weight: 800; color: var(--color-teal);">⚙ INTEGRATION WORKFLOW</div>
+            <div style="font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">Seamless connectivity with Microsoft SharePoint, Fabric Lakehouse, and ERP asset registries.</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; font-weight: 800; color: var(--color-emerald);">🚀 NEXT STEPS</div>
+            <div style="font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">Live sandbox demonstration, custom schema onboarding, and throughput benchmarking.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <div>INTELLIGENT DOCUMENT PROCESSING (IDP)</div>
+        <div>CONCLUSION • 06 / 06</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom Interactive Bar -->
+  <div class="deck-controls">
+    <div id="slide-indicator" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--text-black);">SLIDE 01 / 06</div>
+    <div class="nav-btn-group">
+      <button class="btn" id="prev-btn" onclick="prevSlide()">← PREV</button>
+      <button class="btn" id="next-btn" onclick="nextSlide()">NEXT →</button>
+      <button class="btn" id="notes-btn" onclick="toggleNotes()">SPEAKER NOTES</button>
+      <button class="btn" onclick="window.print()">PRINT / PDF</button>
+    </div>
+  </div>
+
+  <!-- Presenter Notes Drawer -->
+  <div class="notes-drawer" id="notes-drawer">
+    <div class="notes-header" id="notes-header">Speaker Notes (Slide 1)</div>
+    <div id="notes-body">
+      Hello everyone. Welcome to this presentation on Intelligent Document Processing (IDP). Today, I will walk you through how we addressed manual bottlenecks in technical document extraction by replacing rigid heuristics with a multimodal AI layer, and how this architecture is built and deployed on AWS.
+    </div>
+  </div>
+
+  <script>
+    let currentSlide = 1;
+    const totalSlides = 6;
+
+    const notes = {
+      1: "Hello everyone. Welcome to this presentation on Intelligent Document Processing (IDP). Today, I will walk you through how we addressed manual bottlenecks in technical document extraction by replacing rigid heuristics with a multimodal AI layer, and how this architecture is built and deployed on AWS.",
+      2: "In our operational journey, technical manuals were the primary bottleneck. Engineers spent countless hours manually transcribing complex spare parts tables and maintenance checklists. We addressed this directly by building a domain-aware extraction engine that structures maintenance routines, RSPL parts, and troubleshooting trees with exact page-level grounding and immediate spreadsheet export.",
+      3: "Here is the core technical differentiator. Traditional rule-based scrapers broke easily. Our architecture uses an adaptive dual-stream pipeline. When a document is a native digital PDF, we extract digital text at lightning speed. When encountering scanned documents, complex catalog diagrams, or handwritten logbooks, the system automatically triggers high-resolution image rendering and multimodal vision LLMs to parse the content with human-grade comprehension.",
+      4: "Slide 4 details our core technology stack and the end-to-end data execution pipeline. Across the top, you see the 5-stage data flow: from intake and FastAPI asynchronous queuing, to PyMuPDF parsing, Gemini multimodal reasoning, and grounding validation. Beneath, the 4 core pillars show our technology breakdown: FastAPI, Gemini 2.5 Vision, PyMuPDF, and our lightweight SheetJS client.",
+      5: "Slide 5 illustrates our AWS cloud deployment architecture. Across the top is our horizontal infrastructure pipeline: from client ingress through Route 53 and ALB, into our auto-scaling ECS Fargate cluster, securely interacting with encrypted S3 and Gemini APIs, and delivering outputs to enterprise ERP systems. The bottom pillars detail our serverless compute, KMS encryption security, and CloudWatch telemetry.",
+      6: "Thank you all for your time and attention today. We have covered the use case journey, our dual-stream parsing engine, the FastAPI and Gemini technology stack, and our scalable AWS cloud deployment. I would now love to open the floor for any questions, technical discussions, or pilot integration opportunities."
+    };
+
+    function updateSlide() {
+      document.querySelectorAll('.slide').forEach((el, index) => {
+        el.classList.toggle('active', index + 1 === currentSlide);
+      });
+      document.getElementById('slide-indicator').textContent = `SLIDE 0${currentSlide} / 0${totalSlides}`;
+      document.getElementById('notes-header').textContent = `Speaker Notes (Slide ${currentSlide})`;
+      document.getElementById('notes-body').textContent = notes[currentSlide];
+
+      document.getElementById('prev-btn').style.opacity = currentSlide === 1 ? '0.3' : '1';
+      document.getElementById('next-btn').style.opacity = currentSlide === totalSlides ? '0.3' : '1';
+    }
+
+    function nextSlide() {
+      if (currentSlide < totalSlides) {
+        currentSlide++;
+        updateSlide();
+      }
+    }
+
+    function prevSlide() {
+      if (currentSlide > 1) {
+        currentSlide--;
+        updateSlide();
+      }
+    }
+
+    function toggleNotes() {
+      const drawer = document.getElementById('notes-drawer');
+      drawer.classList.toggle('open');
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') nextSlide();
+      if (e.key === 'ArrowLeft') prevSlide();
+      if (e.key.toLowerCase() === 'n') toggleNotes();
+    });
+
+    updateSlide();
+  </script>
+</body>
+</html>

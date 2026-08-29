@@ -5,8 +5,8 @@ import io
 from dataclasses import dataclass
 from typing import Optional
 
-# Hard cap for one-shot PDF extraction (inclusive).
-MAX_PDF_PAGES = 5000
+# Maximum pages allowed in a single one-shot processing batch
+MAX_PDF_PAGES = 500
 
 
 @dataclass
@@ -18,14 +18,13 @@ class PagePayload:
 
 
 def _page_needs_vision(native_text: str, page) -> bool:
-    """Decide when sparse/garbled native text should still send a page image to the LLM."""
+    """Decide when sparse/garbled native text requires sending a rendered page image to the LLM."""
     t = (native_text or "").strip()
     if len(t) < 40:
         return True
     low = t.lower()
     if "intentionally left blank" in low:
         return True
-    # Title-only section covers that front dense image tables (RSPL, BOM sheets).
     if len(t) < 180 and any(
         k in low
         for k in (
@@ -37,17 +36,15 @@ def _page_needs_vision(native_text: str, page) -> bool:
         )
     ):
         return True
-    # CID / encoding-garbled extracts (common in older OEM PDFs).
     if len(t) >= 200:
         weird = sum(1 for ch in t if ord(ch) > 127 and not (ch.isalpha() or ch.isspace()))
         if weird / max(len(t), 1) > 0.2:
             return True
-    # Sparse native text but the page clearly has drawings/images.
     if len(t) < 120:
         try:
             if page.get_images(full=True):
                 return True
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return False
 
@@ -60,7 +57,6 @@ def resolve_page_range(total_pages: int, page_start: Optional[int], page_end: Op
     if end < start:
         start, end = end, start
 
-    # Enforce max pages per request (keeps one-shot runs bounded).
     if (end - start + 1) > MAX_PDF_PAGES:
         end = start + MAX_PDF_PAGES - 1
         end = min(end, total_pages)
@@ -75,7 +71,7 @@ def extract_pdf_pages(
     page_end: Optional[int] = None,
     ocr_auto_rotate: bool = False,
 ) -> list[PagePayload]:
-    """Extract text (and optional page images) from a PDF."""
+    """Extract text and optional page images from a PDF with resource controls."""
     import fitz  # pymupdf
     from pypdf import PdfReader
 
@@ -85,7 +81,6 @@ def extract_pdf_pages(
         return []
 
     if total > MAX_PDF_PAGES and not page_start and not page_end:
-        # No explicit range: process first MAX_PDF_PAGES pages.
         page_start, page_end = 1, MAX_PDF_PAGES
 
     start, end = resolve_page_range(total, page_start, page_end)
@@ -96,27 +91,25 @@ def extract_pdf_pages(
         native_text = ""
         try:
             native_text = (reader.pages[page_num - 1].extract_text() or "").strip()
-        except Exception:  # noqa: BLE001
+        except Exception:
             native_text = ""
 
         try:
             fitz_text = (doc.load_page(page_num - 1).get_text("text") or "").strip()
             if len(fitz_text) > len(native_text):
                 native_text = fitz_text
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
         page = doc.load_page(page_num - 1)
         use_ocr = parse_strategy == "ocr" or _page_needs_vision(native_text, page)
-        # Only render page images when text is weak (avoids rendering thousands of JPEGs).
         if parse_strategy == "ocr" and len(native_text) >= 80 and not ocr_auto_rotate:
             use_ocr = False
-        # Field-history / logbook cards are almost always image scans.
         if ocr_auto_rotate:
             use_ocr = True
+
         image_b64 = None
         if use_ocr:
-            # Portrait image-only pages are often sideways photos of landscape cards.
             rotate = 0
             if ocr_auto_rotate and len(native_text) < 40 and page.rect.height > page.rect.width:
                 rotate = 90
@@ -126,7 +119,6 @@ def extract_pdf_pages(
 
         page_text = native_text
         if image_b64 and (not page_text or _page_needs_vision(native_text, page)):
-            # Mark vision pages so prompts apply dense-table OCR rules even when a short header remains.
             if "OCR VISION EXTRACTION" not in page_text.upper():
                 page_text = (
                     f"{page_text}\n\nOCR VISION EXTRACTION".strip()
@@ -145,6 +137,18 @@ def extract_pdf_pages(
 
     doc.close()
     return pages
+
+
+def convert_docx_to_pdf(file_bytes: bytes) -> bytes:
+    import fitz  # pymupdf
+
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="docx")
+        pdf_bytes = doc.convert_to_pdf()
+        doc.close()
+        return pdf_bytes
+    except Exception as err:
+        raise ValueError(f"Failed to convert document to PDF: {err}") from err
 
 
 def extract_image_page(file_bytes: bytes, filename: str = "image.jpg") -> PagePayload:

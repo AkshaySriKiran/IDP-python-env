@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IDP — Global Admin</title>
+  <title>DocuLoom — Global Admin</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=80">
+  <link rel="stylesheet" href="styles.css?v=112">
   <script>
     (function () {
       try {
@@ -29,17 +29,16 @@
     <header class="app-header">
       <div class="header-logo">
         <div class="logo-icon">
-          <img src="assets/idp-logo.png" alt="IDP logo" class="logo-image" width="42" height="50">
+          <img src="assets/idp-logo.png" alt="DocuLoom logo" class="logo-image" width="42" height="50">
         </div>
         <div class="logo-text">
-          <h1>IDP</h1>
+          <h1>DocuLoom</h1>
           <p>Global Admin</p>
         </div>
       </div>
       <div class="header-status">
-        <a class="btn btn-secondary auth-header-btn" href="index.html" id="admin-back-link">
+        <a class="btn btn-secondary auth-header-btn auth-back-btn" href="index.html" id="admin-back-link" title="Back to app" aria-label="Back to app">
           <i data-lucide="arrow-left"></i>
-          <span>Back to app</span>
         </a>
         <button type="button" class="theme-toggle-btn" id="theme-toggle-btn" title="Switch theme" aria-label="Toggle light and dark mode">
           <i data-lucide="sun" class="theme-icon-sun"></i>
@@ -73,89 +72,182 @@
     </header>
 
     <nav class="admin-nav" aria-label="Admin sections">
-      <button type="button" class="admin-nav-btn active" data-admin-view="monitor">
-        <i data-lucide="activity"></i>
-        <span>Monitoring</span>
-      </button>
-      <button type="button" class="admin-nav-btn" data-admin-view="users">
-        <i data-lucide="users"></i>
-        <span>Users</span>
-      </button>
-      <button type="button" class="admin-nav-btn" data-admin-view="logs">
-        <i data-lucide="scroll-text"></i>
-        <span>Extraction logs</span>
+      <div class="admin-nav-tabs">
+        <button type="button" class="admin-nav-btn active" data-admin-view="monitor" onclick="setAdminView('monitor')">
+          <i data-lucide="activity"></i>
+          <span>Monitoring</span>
+        </button>
+        <button type="button" class="admin-nav-btn" data-admin-view="users" onclick="setAdminView('users')">
+          <i data-lucide="users"></i>
+          <span>Users</span>
+        </button>
+        <button type="button" class="admin-nav-btn" data-admin-view="logs" onclick="setAdminView('logs')">
+          <i data-lucide="scroll-text"></i>
+          <span>Extraction logs</span>
+        </button>
+        <button type="button" class="admin-nav-btn" data-admin-view="sharepoint" onclick="setAdminView('sharepoint')">
+          <i data-lucide="cloud-cog"></i>
+          <span>SharePoint & Graph API</span>
+        </button>
+      </div>
+      <button type="button" class="btn btn-secondary admin-nav-refresh" id="admin-nav-refresh-btn" title="Refresh current view" aria-label="Refresh current view" onclick="setAdminView(document.querySelector('.admin-nav-btn.active')?.getAttribute('data-admin-view') || 'monitor')">
+        <i data-lucide="refresh-cw"></i>
       </button>
     </nav>
 
     <!-- Hidden catalog holder for create-user model fields -->
     <span id="admin-model-catalog" hidden>—</span>
 
-    <!-- Production monitoring stats (between nav and card, same as main app) -->
-    <div class="stats-grid admin-monitor-stats admin-view" id="admin-monitor-grid" data-admin-panel="monitor">
-      <div class="stat-card" data-tone="neutral">
-        <div class="stat-icon-wrapper blue-glow"><i data-lucide="activity"></i></div>
-        <div class="stat-info">
-          <span class="stat-label">API</span>
-          <h2 class="stat-value" id="mon-api-status">—</h2>
-          <span class="stat-meta" id="mon-api-meta">Checking…</span>
+    <!-- Monitoring: Overview + App ops + AWS (no outer box) -->
+    <div class="admin-ops-section admin-view" data-admin-panel="monitor">
+      <h3 class="admin-ops-heading">Overview</h3>
+      <div class="stats-grid admin-monitor-stats" id="admin-monitor-grid">
+        <div class="stat-card" data-tone="neutral">
+          <div class="stat-icon-wrapper blue-glow"><i data-lucide="activity"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">API</span>
+            <h2 class="stat-value" id="mon-api-status">—</h2>
+            <span class="stat-meta" id="mon-api-meta">Checking…</span>
+          </div>
+        </div>
+        <div class="stat-card" data-tone="neutral">
+          <div class="stat-icon-wrapper purple-glow"><i data-lucide="file-stack"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Runs (recent)</span>
+            <h2 class="stat-value" id="mon-runs">—</h2>
+            <span class="stat-meta" id="mon-runs-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card" data-tone="neutral">
+          <div class="stat-icon-wrapper green-glow"><i data-lucide="check-circle-2"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Success rate</span>
+            <h2 class="stat-value" id="mon-success">—</h2>
+            <span class="stat-meta" id="mon-success-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card" data-tone="neutral">
+          <div class="stat-icon-wrapper amber-glow"><i data-lucide="shield-check"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Avg quality</span>
+            <h2 class="stat-value" id="mon-score">—</h2>
+            <span class="stat-meta" id="mon-score-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card" data-tone="neutral">
+          <div class="stat-icon-wrapper blue-glow"><i data-lucide="timer"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Avg duration</span>
+            <h2 class="stat-value" id="mon-duration">—</h2>
+            <span class="stat-meta" id="mon-duration-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card" data-tone="neutral">
+          <div class="stat-icon-wrapper red-glow"><i data-lucide="alert-triangle"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Needs attention</span>
+            <h2 class="stat-value" id="mon-low">—</h2>
+            <span class="stat-meta" id="mon-low-meta">Score &lt; 50%</span>
+          </div>
         </div>
       </div>
-      <div class="stat-card" data-tone="neutral">
-        <div class="stat-icon-wrapper purple-glow"><i data-lucide="file-stack"></i></div>
-        <div class="stat-info">
-          <span class="stat-label">Runs (recent)</span>
-          <h2 class="stat-value" id="mon-runs">—</h2>
-          <span class="stat-meta" id="mon-runs-meta">—</span>
+
+      <h3 class="admin-ops-heading">App ops</h3>
+      <div class="admin-ops-grid" id="admin-ops-app-grid">
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper blue-glow"><i data-lucide="loader"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Extract queue</span>
+            <h2 class="stat-value" id="ops-queue">—</h2>
+            <span class="stat-meta" id="ops-queue-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper red-glow"><i data-lucide="circle-x"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Failures (24h)</span>
+            <h2 class="stat-value" id="ops-fail-day">—</h2>
+            <span class="stat-meta" id="ops-fail-day-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper purple-glow"><i data-lucide="rows-3"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Rows extracted</span>
+            <h2 class="stat-value" id="ops-rows">—</h2>
+            <span class="stat-meta" id="ops-rows-meta">recent window</span>
+          </div>
+        </div>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper green-glow"><i data-lucide="users"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Active users</span>
+            <h2 class="stat-value" id="ops-users">—</h2>
+            <span class="stat-meta" id="ops-users-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper amber-glow"><i data-lucide="sparkles"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Top model</span>
+            <h2 class="stat-value stat-value-sm" id="ops-model">—</h2>
+            <span class="stat-meta" id="ops-model-meta">—</span>
+          </div>
         </div>
       </div>
-      <div class="stat-card" data-tone="neutral">
-        <div class="stat-icon-wrapper green-glow"><i data-lucide="check-circle-2"></i></div>
-        <div class="stat-info">
-          <span class="stat-label">Success rate</span>
-          <h2 class="stat-value" id="mon-success">—</h2>
-          <span class="stat-meta" id="mon-success-meta">—</span>
+
+      <h3 class="admin-ops-heading">AWS services</h3>
+      <div class="admin-ops-grid" id="admin-ops-aws-grid">
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper purple-glow"><i data-lucide="server"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">ECS tasks</span>
+            <h2 class="stat-value" id="ops-ecs">—</h2>
+            <span class="stat-meta" id="ops-ecs-meta">—</span>
+          </div>
         </div>
-      </div>
-      <div class="stat-card" data-tone="neutral">
-        <div class="stat-icon-wrapper amber-glow"><i data-lucide="shield-check"></i></div>
-        <div class="stat-info">
-          <span class="stat-label">Avg quality</span>
-          <h2 class="stat-value" id="mon-score">—</h2>
-          <span class="stat-meta" id="mon-score-meta">—</span>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper blue-glow"><i data-lucide="cpu"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Task CPU</span>
+            <h2 class="stat-value" id="ops-cpu">—</h2>
+            <span class="stat-meta" id="ops-cpu-meta">—</span>
+          </div>
         </div>
-      </div>
-      <div class="stat-card" data-tone="neutral">
-        <div class="stat-icon-wrapper blue-glow"><i data-lucide="timer"></i></div>
-        <div class="stat-info">
-          <span class="stat-label">Avg duration</span>
-          <h2 class="stat-value" id="mon-duration">—</h2>
-          <span class="stat-meta" id="mon-duration-meta">—</span>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper amber-glow"><i data-lucide="memory-stick"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Task memory</span>
+            <h2 class="stat-value" id="ops-memory">—</h2>
+            <span class="stat-meta" id="ops-memory-meta">—</span>
+          </div>
         </div>
-      </div>
-      <div class="stat-card" data-tone="neutral">
-        <div class="stat-icon-wrapper red-glow"><i data-lucide="alert-triangle"></i></div>
-        <div class="stat-info">
-          <span class="stat-label">Needs attention</span>
-          <h2 class="stat-value" id="mon-low">—</h2>
-          <span class="stat-meta" id="mon-low-meta">Score &lt; 50%</span>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper green-glow"><i data-lucide="network"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">ALB targets</span>
+            <h2 class="stat-value" id="ops-alb">—</h2>
+            <span class="stat-meta" id="ops-alb-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper blue-glow"><i data-lucide="hard-drive"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Audit S3</span>
+            <h2 class="stat-value" id="ops-s3">—</h2>
+            <span class="stat-meta" id="ops-s3-meta">—</span>
+          </div>
+        </div>
+        <div class="stat-card admin-ops-card" data-tone="neutral">
+          <div class="stat-icon-wrapper purple-glow"><i data-lucide="globe"></i></div>
+          <div class="stat-info">
+            <span class="stat-label">Region</span>
+            <h2 class="stat-value stat-value-sm" id="ops-region">—</h2>
+            <span class="stat-meta" id="ops-region-meta">AWS</span>
+          </div>
         </div>
       </div>
     </div>
-
-    <!-- Production monitoring -->
-    <section class="admin-page-card glass-card admin-monitor-card admin-view" data-admin-panel="monitor">
-      <div class="admin-section-head">
-        <div>
-          <h2>Production monitoring</h2>
-          <p class="admin-section-sub">Live API health and recent extraction summary</p>
-        </div>
-        <button type="button" class="btn btn-secondary history-toolbar-control" id="admin-monitor-refresh-btn">
-          <i data-lucide="refresh-cw"></i>
-          <span>Refresh</span>
-        </button>
-      </div>
-      <p class="admin-monitor-note" id="mon-last-error" hidden></p>
-    </section>
 
     <!-- Users summary stats -->
     <div class="stats-grid admin-users-stats admin-view" id="admin-users-stats" data-admin-panel="users" hidden>
@@ -227,8 +319,23 @@
               <input type="text" id="admin-create-name" class="settings-input" placeholder="Display name">
             </label>
             <label class="admin-field">
-              <span>Temp password</span>
-              <input type="password" id="admin-create-password" class="settings-input" placeholder="Min 8 characters" required minlength="8">
+              <span>Role</span>
+              <select id="admin-create-role" class="settings-select" title="Assign Role">
+                <option value="editor" selected>Editor</option>
+                <option value="approver">Approver</option>
+                <option value="viewer">Viewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <label class="admin-field" id="admin-create-approver-field">
+              <span>Assigned Approver</span>
+              <select id="admin-create-approver" class="settings-select" title="Assign Approver">
+                <option value="">-- None (Unassigned) --</option>
+              </select>
+            </label>
+            <label class="admin-field">
+              <span>SharePoint Folder (Path or Item ID)</span>
+              <input type="text" id="admin-create-sp-folder" class="settings-input" placeholder="e.g. /Manuals/Pumps or Item ID">
             </label>
             <label class="admin-field">
               <span>Copilot AI / day</span>
@@ -237,7 +344,13 @@
             <div class="admin-field admin-field-models">
               <span class="admin-field-label">Allocate models</span>
               <p class="settings-hint">Select one or more models for this user.</p>
-              <div id="admin-create-allowed-box" class="admin-allowed-box" role="group" aria-label="Allocate models"></div>
+              <div id="admin-create-allowed-box" class="admin-allowed-box" role="group" aria-label="Allocate models">
+                <label class="admin-check"><input type="checkbox" value="gemini-3.6-flash" checked><span>gemini-3.6-flash</span></label>
+                <label class="admin-check"><input type="checkbox" value="gemini-3.1-pro-preview" checked><span>gemini-3.1-pro-preview</span></label>
+                <label class="admin-check"><input type="checkbox" value="gemini-2.5-flash-lite"><span>gemini-2.5-flash-lite</span></label>
+                <label class="admin-check"><input type="checkbox" value="gemini-2.5-flash"><span>gemini-2.5-flash</span></label>
+                <label class="admin-check"><input type="checkbox" value="gemini-2.5-pro"><span>gemini-2.5-pro</span></label>
+              </div>
             </div>
             <div class="admin-create-actions">
               <button type="submit" class="btn btn-primary">Create user</button>
@@ -249,7 +362,6 @@
         <div class="admin-subcard admin-directory-card">
           <div class="admin-subcard-head">
             <h3>Directory</h3>
-            <button type="button" class="btn btn-secondary" id="admin-refresh-btn">Refresh</button>
           </div>
           <div class="admin-table-wrap admin-directory-scroll">
             <table class="data-table admin-users-table">
@@ -257,6 +369,8 @@
                 <tr>
                   <th>User</th>
                   <th>Role</th>
+                  <th>Assigned Approver</th>
+                  <th>SharePoint Folder</th>
                   <th>Status</th>
                   <th>Copilot</th>
                   <th>Models</th>
@@ -267,6 +381,10 @@
             </table>
           </div>
         </div>
+      </div>
+
+      <div class="grid-footer" style="margin-top: 0.75rem; border: 1px solid var(--border-glass); padding: 0.55rem 1.25rem; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: hsla(220, 40%, 6%, 0.15);">
+        <p class="grid-disclaimer" style="position: static; transform: none; margin: 0; font-size: 0.78rem; color: hsla(215, 10%, 45%, 0.9); line-height: 1.3; text-align: center;">AI-generated output. Engineer review recommended prior to use</p>
       </div>
     </section>
 
@@ -322,30 +440,27 @@
         <div>
           <h2>Extraction logs</h2>
         </div>
-      </div>
-      <div class="admin-table-wrap" style="padding-top:0;">
-        <div class="admin-table-toolbar">
-          <strong>Recent runs</strong>
-          <div class="admin-logs-filters">
-            <select id="admin-logs-status" class="settings-select" title="Filter by status">
-              <option value="">All statuses</option>
-              <option value="done">pass</option>
-              <option value="error">error</option>
-            </select>
-            <input type="search" id="admin-logs-email" class="settings-input" placeholder="Filter email" style="max-width:12rem;">
-            <button type="button" class="btn btn-secondary" id="admin-logs-refresh-btn">Refresh</button>
-          </div>
+        <div class="history-toolbar admin-logs-filters">
+          <select id="admin-logs-status" class="settings-select history-toolbar-control" title="Filter by status">
+            <option value="">All statuses</option>
+            <option value="done">pass</option>
+            <option value="error">error</option>
+          </select>
+          <input type="search" id="admin-logs-user" class="settings-input history-toolbar-control" placeholder="Filter name" size="14" title="Filter by user name" autocomplete="off" spellcheck="false" aria-label="Filter by user name">
         </div>
+      </div>
+      <div class="admin-table-wrap admin-logs-scroll">
         <table class="data-table admin-logs-table">
           <thead>
             <tr>
-              <th>When</th>
+              <th>Start time</th>
+              <th>End time</th>
               <th>User</th>
               <th>File</th>
-              <th>Engine</th>
+              <th>AI Model</th>
               <th>Score</th>
               <th>M / S / T</th>
-              <th>Duration</th>
+              <th>Run time</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -353,9 +468,134 @@
         </table>
         <p id="admin-logs-detail" class="admin-muted admin-logs-detail" hidden></p>
       </div>
+
+      <div class="grid-footer" style="margin-top: auto; border-top: 1px solid var(--border-glass); padding: 0.55rem 1.25rem; display: flex; align-items: center; justify-content: center; border-radius: 0 0 16px 16px; background: hsla(220, 40%, 6%, 0.15);">
+        <p class="grid-disclaimer" style="position: static; transform: none; margin: 0; font-size: 0.78rem; color: hsla(215, 10%, 45%, 0.9); line-height: 1.3; text-align: center;">AI-generated output. Engineer review recommended prior to use</p>
+      </div>
     </section>
 
-    <footer class="app-page-footer">AI-generated output. Engineer review recommended prior to use</footer>
+    <!-- SharePoint / Graph API Stats -->
+    <div class="stats-grid admin-sp-stats admin-view" id="admin-sp-stats" data-admin-panel="sharepoint" hidden>
+      <div class="stat-card">
+        <div class="stat-icon-wrapper green-glow"><i data-lucide="link"></i></div>
+        <div class="stat-info">
+          <span class="stat-label">Graph API Status</span>
+          <h2 class="stat-value stat-value-sm" id="sp-stat-status" style="font-size: 1.15rem; color: #10b981;">Connected</h2>
+          <span class="stat-meta" id="sp-stat-status-meta">Microsoft Graph v1.0</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-wrapper blue-glow"><i data-lucide="hard-drive"></i></div>
+        <div class="stat-info">
+          <span class="stat-label">Active Drive ID</span>
+          <h2 class="stat-value stat-value-sm" id="sp-stat-drive" style="font-size: 0.82rem; word-break: break-all;">—</h2>
+          <span class="stat-meta">SharePoint Library</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-wrapper purple-glow"><i data-lucide="folder"></i></div>
+        <div class="stat-info">
+          <span class="stat-label">Folder Directory</span>
+          <h2 class="stat-value stat-value-sm" id="sp-stat-folder" style="font-size: 0.95rem;">Root Library</h2>
+          <span class="stat-meta" id="sp-stat-folder-meta">Testing Site</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-wrapper amber-glow"><i data-lucide="folder-up"></i></div>
+        <div class="stat-info">
+          <span class="stat-label">Local Uploads Folder</span>
+          <h2 class="stat-value stat-value-sm" style="font-size: 1.05rem; color: #38bdf8;">"Local Uploads"</h2>
+          <span class="stat-meta">Single source of truth</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- SharePoint Configuration Card -->
+    <section class="admin-page-card glass-card admin-view" data-admin-panel="sharepoint" hidden>
+      <div class="admin-section-head">
+        <div>
+          <h2>Microsoft Graph & SharePoint Configuration</h2>
+          <p class="admin-section-sub">Configure SharePoint Document Library drive and folder targets for Approvers, Editors, and Viewers</p>
+        </div>
+      </div>
+
+      <div class="admin-users-layout" style="grid-template-columns: 1fr 1fr; gap: 1.25rem;">
+        <!-- Config Form -->
+        <div class="admin-subcard">
+          <div class="admin-subcard-head">
+            <h3><i data-lucide="sliders"></i> Target SharePoint Directory</h3>
+          </div>
+          <form id="admin-sp-form" class="admin-create-grid" style="grid-template-columns: 1fr;">
+            <label class="admin-field">
+              <span>Microsoft Graph Folder URL (Paste full endpoint)</span>
+              <input type="text" id="admin-sp-url-input" class="settings-input" placeholder="https://graph.microsoft.com/v1.0/drives/b!.../items/01.../children" spellcheck="false" autocomplete="off">
+              <small class="admin-muted" style="font-size: 0.76rem; margin-top: 0.25rem;">Pasting a full Graph endpoint automatically populates the Drive ID and Folder Item ID below.</small>
+            </label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+              <label class="admin-field">
+                <span>Drive ID</span>
+                <input type="text" id="admin-sp-drive-input" class="settings-input" placeholder="b!..." required spellcheck="false">
+              </label>
+              <label class="admin-field">
+                <span>Folder Item ID (Optional)</span>
+                <input type="text" id="admin-sp-folder-input" class="settings-input" placeholder="Leave blank for root" spellcheck="false">
+              </label>
+            </div>
+            <label class="admin-field">
+              <span>Folder Display Name / Label</span>
+              <input type="text" id="admin-sp-name-input" class="settings-input" placeholder="e.g. Testing Site / Maintenance Manuals">
+            </label>
+            <label class="admin-field" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+              <input type="checkbox" id="admin-sp-sync-input" checked style="width: 1.1rem; height: 1.1rem; accent-color: var(--color-teal);">
+              <span>Automatically check/create <strong>"Local Uploads"</strong> folder for local PC file uploads</span>
+            </label>
+            <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem; flex-wrap: wrap;">
+              <button type="submit" class="btn btn-primary" id="admin-sp-save-btn">
+                <i data-lucide="save"></i>
+                <span>Save & Apply</span>
+              </button>
+              <button type="button" class="btn btn-secondary" id="admin-sp-test-btn">
+                <i data-lucide="play-circle"></i>
+                <span>Test Connection</span>
+              </button>
+              <button type="button" class="btn btn-ghost" id="admin-sp-reset-btn" title="Reset to default environment target">
+                <i data-lucide="rotate-ccw"></i>
+                <span>Reset to Default</span>
+              </button>
+            </div>
+            <p id="admin-sp-feedback" class="admin-muted" style="margin-top: 0.5rem; font-size: 0.85rem;" hidden></p>
+          </form>
+        </div>
+
+        <!-- Live Connection & Preview -->
+        <div class="admin-subcard">
+          <div class="admin-subcard-head" style="display: flex; justify-content: space-between; align-items: center;">
+            <h3><i data-lucide="file-check"></i> Connected Library Files</h3>
+            <span class="status-pill status-pill-success" id="admin-sp-live-badge">Testing Site</span>
+          </div>
+          <div id="admin-sp-preview-box" style="min-height: 220px; background: rgba(0, 0, 0, 0.2); border-radius: 8px; padding: 1rem; border: 1px solid var(--border-glass);">
+            <p class="admin-muted" id="admin-sp-preview-status">Click <strong>Test Connection</strong> or <strong>Save</strong> to test and list PDFs from this folder.</p>
+            <ul id="admin-sp-files-preview-list" style="list-style: none; padding: 0; margin: 0.75rem 0 0; display: flex; flex-direction: column; gap: 0.45rem;"></ul>
+          </div>
+          <div style="margin-top: 0.75rem; font-size: 0.8rem; color: hsla(215, 15%, 65%, 0.9); line-height: 1.4;">
+            <p><i data-lucide="info" style="width: 14px; height: 14px; vertical-align: middle; display: inline-block;"></i> All user roles (<strong>Approvers</strong>, <strong>Editors</strong>, <strong>Viewers</strong>) will extract documents directly from this configured SharePoint folder and save local PC uploads to its <strong>Local Uploads</strong> directory.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-footer" style="margin-top: auto; border-top: 1px solid var(--border-glass); padding: 0.55rem 1.25rem; display: flex; align-items: center; justify-content: center; border-radius: 0 0 16px 16px; background: hsla(220, 40%, 6%, 0.15);">
+        <p class="grid-disclaimer" style="position: static; transform: none; margin: 0; font-size: 0.78rem; color: hsla(215, 10%, 45%, 0.9); line-height: 1.3; text-align: center;">Single Source of Truth: Microsoft Graph & Fabric Integration</p>
+      </div>
+    </section>
+  <!-- Floating Buffer Pop-up Card (same as My extracts & Front Page) -->
+  <div class="progress-overlay" id="admin-logs-progress-overlay" role="status" aria-live="polite">
+    <div class="progress-drag-handle" id="admin-logs-progress-drag-handle" title="Drag to move">
+      <span class="progress-drag-grip" aria-hidden="true"></span>
+      <span id="admin-logs-overlay-tag">PROCESSING</span>
+    </div>
+    <div class="spinner"></div>
+    <h4 id="admin-logs-progress-title">Fetching Fabric Logs</h4>
+    <p class="progress-subtext" id="admin-logs-progress-status">Querying Microsoft Fabric WH_IDP extraction logs…</p>
   </div>
 
   <div id="login-modal" class="auth-modal" hidden>
@@ -377,6 +617,6 @@
       if (typeof lucide !== 'undefined') lucide.createIcons();
     });
   </script>
-  <script src="auth-admin.js?v=35"></script>
+  <script src="auth-admin.js?v=52"></script>
 </body>
 </html>

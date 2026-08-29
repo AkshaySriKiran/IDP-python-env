@@ -38,7 +38,38 @@ Parameters:
 
   GeminiModel:
     Type: String
-    Default: gemini-3.5-flash
+    Default: gemini-3.6-flash
+
+  AzureTenantId:
+    Type: String
+    Default: "196e20ca-f848-4dbc-b812-0125cda86494"
+    Description: Microsoft Entra ID Tenant ID for SSO & Fabric
+
+  AzureClientId:
+    Type: String
+    Default: "8d75ea52-c177-4dba-8bd0-19808e8f2220"
+    Description: Microsoft Entra ID App Registration Client ID
+
+  AzureClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Microsoft Entra ID Client Secret
+
+  FabricSqlServer:
+    Type: String
+    Default: "ziqg4gki7c6e3oasaes43kdesq-vrf3elrwv7burav5qzwzj6chau.datawarehouse.fabric.microsoft.com"
+    Description: Microsoft Fabric Lakehouse / Warehouse SQL Server Endpoint
+
+  FabricSqlDatabase:
+    Type: String
+    Default: "WH_IDP"
+    Description: Microsoft Fabric SQL Database Name
+
+  SharePointDriveId:
+    Type: String
+    Default: "b!dpmeeDFd5E6TFEtyFCg5HjIjqzal9LJHm9Yzs1858I_NUV7MO6ZHTbVcAJNbnWkk"
+    Description: Microsoft Graph SharePoint Drive ID
 
   ContainerCpu:
     Type: Number
@@ -94,11 +125,12 @@ Resources:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub "${ProjectName}/app"
-      Description: OmniParse API secrets (Gemini / future Bedrock)
+      Description: OmniParse API secrets (Gemini, Azure SSO, JWT)
       SecretString: !Sub
-        - '{"GEMINI_API_KEY":"${Key}","GEMINI_MODEL":"${Model}"}'
+        - '{"GEMINI_API_KEY":"${Key}","GEMINI_MODEL":"${Model}","AZURE_CLIENT_SECRET":"${AzureSecret}"}'
         - Key: !Ref GeminiApiKey
           Model: !Ref GeminiModel
+          AzureSecret: !Ref AzureClientSecret
 
   # ----- ECR -----
   EcrRepository:
@@ -113,32 +145,29 @@ Resources:
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Keep last 10 images",
+                "description": "Keep last 5 images",
                 "selection": {
                   "tagStatus": "any",
                   "countType": "imageCountMoreThan",
-                  "countNumber": 10
+                  "countNumber": 5
                 },
                 "action": { "type": "expire" }
               }
             ]
           }
 
-  # ----- Logs -----
-  # Name includes "-api" so a new stack can create after an orphaned
-  # /ecs/${ProjectName} was retained (DELETE_FAILED without logs:DeleteLogGroup).
+  # ----- CloudWatch Logs -----
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      # No RetentionInDays — App@Team may lack logs:PutRetentionPolicy.
-      # IT can set retention later in console once permissions allow.
       LogGroupName: !Sub "/ecs/${ProjectName}-api"
+      RetentionInDays: 30
 
-  # ----- IAM -----
+  # ----- IAM Roles -----
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${ProjectName}-ecs-execution"
+      RoleName: !Sub "${ProjectName}-execution-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -149,19 +178,18 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Policies:
-        - PolicyName: SecretsAccess
+        - PolicyName: ReadSecrets
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
+                Action: secretsmanager:GetSecretValue
                 Resource: !Ref AppSecret
 
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${ProjectName}-ecs-task"
+      RoleName: !Sub "${ProjectName}-task-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -170,15 +198,7 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: RuntimeSecrets
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !Ref AppSecret
-        - PolicyName: ExtractAuditS3
+        - PolicyName: WriteAuditLogs
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -203,9 +223,6 @@ Resources:
         - !Ref PublicSubnet2Id
       SecurityGroups:
         - !Ref AlbSecurityGroup
-      # LoadBalancerAttributes omitted — App@Team may lack
-      # elasticloadbalancing:ModifyLoadBalancerAttributes.
-      # Default idle timeout is 60s; IT can raise to 180s in console later.
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -223,8 +240,6 @@ Resources:
       UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: "200"
-      # TargetGroupAttributes omitted — App@Team may lack
-      # elasticloadbalancing:ModifyTargetGroupAttributes. Default deregistration delay is fine.
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -286,10 +301,33 @@ Resources:
             # Durable admin extract outcome logs (survives task redeploy).
             - Name: EXTRACT_AUDIT_S3_BUCKET
               Value: !Ref AuditBucket
+            - Name: AZURE_TENANT_ID
+              Value: !Ref AzureTenantId
+            - Name: AZURE_CLIENT_ID
+              Value: !Ref AzureClientId
+            - Name: AZURE_APP_ID_URI
+              Value: !Sub "api://${AzureClientId}"
+            - Name: FABRIC_SQL_SERVER
+              Value: !Ref FabricSqlServer
+            - Name: FABRIC_SQL_DATABASE
+              Value: !Ref FabricSqlDatabase
+            - Name: SQL_SERVER
+              Value: !Ref FabricSqlServer
+            - Name: SQL_DATABASE
+              Value: !Ref FabricSqlDatabase
+            - Name: SQL_AUTHENTICATION
+              Value: "ActiveDirectoryServicePrincipal"
+            - Name: SHAREPOINT_DRIVE_ID
+              Value: !Ref SharePointDriveId
+            - Name: UI_BASE_URL
+              Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+            - Name: SSO_REDIRECT_URI
+              Value: !Sub "https://${CloudFrontDistribution.DomainName}/api/auth/sso/callback"
           Secrets:
             - Name: GEMINI_API_KEY
               ValueFrom: !Sub "${AppSecret}:GEMINI_API_KEY::"
-            # Stable signing key so redeploys do not invalidate active sessions.
+            - Name: AZURE_CLIENT_SECRET
+              ValueFrom: !Sub "${AppSecret}:AZURE_CLIENT_SECRET::"
             - Name: JWT_SECRET
               ValueFrom: !Sub "${AppSecret}:JWT_SECRET::"
           LogConfiguration:

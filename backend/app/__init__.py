@@ -1,1 +1,1 @@
-"""OmniParse Maintenance Extraction API."""
+"""OmniParse IDP Backend Application Package."""

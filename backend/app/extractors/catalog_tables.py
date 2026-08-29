@@ -1,16 +1,7 @@
-"""Deterministic spare-parts catalog table parser.
-
-OEM manuals (BOMCO / NOV-style) often put dense No./Code/Name/Qty tables
-beside diagrams. LLMs frequently sample only a few rows from those pages.
-This parser recovers every row from native page text so diagram+table pages
-are not under-extracted.
-"""
-
 from __future__ import annotations
 
 import re
 from typing import Any
-
 
 _HEADER_RE = re.compile(
     r"^(?:no\.?|code|name|qty\.?|quantity|remarks|figure\s*no\.?)$",
@@ -35,16 +26,14 @@ def _looks_like_code(line: str) -> bool:
     s = line.strip()
     if not s or _is_header_token(s) or _ITEM_NO_RE.match(s) or _QTY_RE.match(s):
         return False
-    # Common OEM codes are alphanumeric and reasonably long.
     if not _CODE_RE.match(s):
         return False
-    # Prefer codes that contain a digit (filters plain words like "Remarks").
     return any(ch.isdigit() for ch in s)
 
 
 def _clean_assembly(title: str) -> str:
     t = re.sub(r"\s+", " ", (title or "").strip())
-    t = re.sub(r"^\d+\s*", "", t)  # leading printed page number leftovers
+    t = re.sub(r"^\d+\s*", "", t)
     return t[:180] if t else "NA"
 
 
@@ -56,7 +45,6 @@ def detect_catalog_assembly(text: str) -> str:
         m = _ASSEMBLY_RE.match(line)
         if m:
             return _clean_assembly(m.group(1))
-        # "Adjusting screw assembly (BC100113-0700B1)" style without Catalogue prefix
         if "(" in line and ")" in line and any(k in line.lower() for k in ("assembly", "module", "device")):
             if len(line) < 120:
                 return _clean_assembly(line)
@@ -114,7 +102,6 @@ def extract_nov_spare_rows(
     page_num: int,
     doc_name: str = "NA",
 ) -> list[dict[str, Any]]:
-    """Parse NOV-style recommended spare lists (Item / Description / Ref / NOV Part No / Qty)."""
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if len(lines) < 8:
         return []
@@ -134,15 +121,8 @@ def extract_nov_spare_rows(
             break
 
     stop_markers = {
-        "MATERIALS DATA",
-        "COMMISSIONING",
-        "SPARES",
-        "TWO YEAR OPER.",
-        "TWO YEAR O",
-        "EQUIPMENT DESCRIPTION",
-        "DOC. NO:",
-        "SUPPLIER'S NAME",
-        "PAGE",
+        "MATERIALS DATA", "COMMISSIONING", "SPARES", "TWO YEAR OPER.",
+        "TWO YEAR O", "EQUIPMENT DESCRIPTION", "DOC. NO:", "SUPPLIER'S NAME", "PAGE",
     }
 
     rows: list[dict[str, Any]] = []
@@ -166,7 +146,6 @@ def extract_nov_spare_rows(
         item_no: str | None = None
         start = i
         if _ITEM_NO_RE.match(tok):
-            # Prefer sequential item numbers; bare qty lines can look like item nos.
             candidate = int(tok)
             if last_item and candidate not in {last_item + 1, last_item + 2} and candidate > last_item + 5:
                 i += 1
@@ -174,7 +153,6 @@ def extract_nov_spare_rows(
             item_no = tok
             start = i + 1
         elif last_item and any(_NOV_PART_RE.search(x) for x in lines[i : i + 5]):
-            # Some OEM exports drop an item number; recover as last+1 when a NOV code follows.
             item_no = str(last_item + 1)
             start = i
         else:
@@ -206,7 +184,6 @@ def extract_nov_spare_rows(
             drawing = prefix
 
         if before:
-            # Drop leading pure qty leftovers.
             while before and _QTY_RE.match(before[0]) and not any(c.isalpha() for c in before[0]):
                 before = before[1:]
             if not before:
@@ -218,11 +195,7 @@ def extract_nov_spare_rows(
                 if (
                     _looks_like_code(maybe_ref)
                     or (maybe_ref.isupper() and maybe_ref.isalpha() and 2 <= len(maybe_ref) <= 16)
-                    or (
-                        any(ch.isalpha() for ch in maybe_ref)
-                        and any(ch.isdigit() for ch in maybe_ref)
-                        and len(maybe_ref) <= 40
-                    )
+                    or (any(ch.isalpha() for ch in maybe_ref) and any(ch.isdigit() for ch in maybe_ref) and len(maybe_ref) <= 40)
                 ) and maybe_ref != before[0]:
                     drawing = maybe_ref
                     part_name = " ".join(before[:-1])
@@ -238,10 +211,7 @@ def extract_nov_spare_rows(
             i += 1
             continue
         if part_name.upper() in {
-            "DESCRIPTION",
-            "ITEM NO.",
-            "ITEM NO",
-            "NOV PART NO.",
+            "DESCRIPTION", "ITEM NO.", "ITEM NO", "NOV PART NO.",
             "DESCRIPTION OF THE RECOMMENDED SPARE PARTS",
         }:
             i += 1
@@ -280,7 +250,7 @@ def extract_nov_spare_rows(
         )
         try:
             last_item = int(item_no)
-        except Exception:  # noqa: BLE001
+        except Exception:
             last_item += 1
         consumed = (start - i) + nov_idx + 1 + min(len(qty_vals), 2)
         i += max(consumed, 2)
@@ -294,15 +264,12 @@ def extract_bomco_catalog_spare_rows(
     page_num: int,
     doc_name: str = "NA",
 ) -> list[dict[str, Any]]:
-    """Parse No./Code/Name/Qty catalog blocks from page text."""
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if len(lines) < 6:
         return []
 
-    # Need a parts-table header signal.
     header_hits = sum(1 for ln in lines[:40] if _is_header_token(ln))
     if header_hits < 3 and not any(_ASSEMBLY_RE.match(ln) for ln in lines[:20]):
-        # Still allow pages that continue a prior table (item nos + codes only).
         code_like = sum(1 for ln in lines if _looks_like_code(ln))
         item_like = sum(1 for ln in lines if _ITEM_NO_RE.match(ln))
         if code_like < 3 or item_like < 3:
@@ -334,10 +301,8 @@ def extract_bomco_catalog_spare_rows(
             if _is_header_token(tok):
                 j += 1
                 continue
-            # Quantity usually appears after the name.
             if _QTY_RE.match(tok) and name_parts:
                 break
-            # Avoid swallowing the next code as name.
             if _looks_like_code(tok) and name_parts:
                 break
             name_parts.append(tok)
@@ -350,7 +315,6 @@ def extract_bomco_catalog_spare_rows(
             qty = lines[j]
             j += 1
 
-        # Optional remarks until next item.
         remarks_parts: list[str] = []
         while j < n:
             tok = lines[j]
@@ -364,7 +328,6 @@ def extract_bomco_catalog_spare_rows(
                 break
 
         part_name = re.sub(r"\s+", " ", " ".join(name_parts)).strip() or "NA"
-        # Skip header false-positives like item "No." misread.
         if part_name == "NA" and code.upper() in {"CODE", "NAME", "QTY"}:
             i = j if j > i else i + 1
             continue
@@ -394,14 +357,12 @@ def extract_catalog_spare_rows(
     page_num: int,
     doc_name: str = "NA",
 ) -> list[dict[str, Any]]:
-    """Recover dense spare rows from native page text (BOMCO catalog + NOV RSPL)."""
     nov_rows = extract_nov_spare_rows(text, page_num=page_num, doc_name=doc_name)
     bomco_rows = extract_bomco_catalog_spare_rows(text, page_num=page_num, doc_name=doc_name)
     if not nov_rows:
         return bomco_rows
     if not bomco_rows:
         return nov_rows
-    # Prefer the denser deterministic parse for the page.
     return nov_rows if len(nov_rows) >= len(bomco_rows) else bomco_rows
 
 
@@ -409,9 +370,7 @@ def merge_spare_rows(
     llm_rows: list[dict[str, Any]],
     catalog_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Union LLM + catalog rows; keep PDF/catalog reading order."""
     if not catalog_rows:
-        # Preserve LLM order and stamp pdf_order if missing.
         out: list[dict[str, Any]] = []
         for i, row in enumerate(list(llm_rows or []), start=1):
             r = dict(row)
@@ -432,7 +391,6 @@ def merge_spare_rows(
             return f"I:{item}|{name}"
         return f"N:{name}|{item}"
 
-    # Catalog rows already follow PDF top-to-bottom order — keep that sequence.
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in catalog_rows:
@@ -450,7 +408,6 @@ def merge_spare_rows(
         if not r.get("pdf_order"):
             r["pdf_order"] = len(merged) + 1
         merged.append(r)
-    # Re-stamp contiguous pdf_order after merge.
     for i, row in enumerate(merged, start=1):
         row["pdf_order"] = i
     return merged
