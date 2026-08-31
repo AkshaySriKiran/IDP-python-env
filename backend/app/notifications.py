@@ -1,13 +1,16 @@
-"""Persistent in-app notifications (JSON file). Fan-out is event-driven from review-sync / cache hits."""
+"""Persistent in-app notifications — Fabric (Phase E) with local JSON fallback."""
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .config import DATA_DIR, get_ui_base_url
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.RLock()
 NOTIF_FILE = DATA_DIR / "notifications.json"
@@ -40,6 +43,38 @@ def deep_link_for_run(run_id: str) -> str:
     return f"{get_ui_base_url()}/index.html?fabric_run_id={rid}"
 
 
+def _fabric_ready() -> bool:
+    try:
+        from .integrations import fabric_sql
+        return fabric_sql.fabric_configured()
+    except Exception:
+        return False
+
+
+def _with_fabric_conn():
+    from .integrations import fabric_sql
+    from .integrations import fabric_schema
+
+    conn = fabric_sql.connect()
+    fabric_schema.ensure_notifications_table(conn)
+    return conn
+
+
+def _row_to_item(r: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(r.get("notif_id") or r.get("id") or ""),
+        "recipient_email": str(r.get("recipient_email") or "").strip().lower(),
+        "event_type": str(r.get("event_type") or "info"),
+        "run_id": str(r.get("run_id") or ""),
+        "title": str(r.get("title") or "Document"),
+        "body": str(r.get("body") or ""),
+        "actor_email": (str(r.get("actor_email") or "").strip().lower() or None),
+        "url": str(r.get("url") or ""),
+        "created_at": str(r.get("created_at") or ""),
+        "read": str(r.get("is_read") or "").lower() in {"1", "true", "yes", "y"},
+    }
+
+
 def upsert_document_notification(
     *,
     recipient_email: str,
@@ -55,6 +90,56 @@ def upsert_document_notification(
     et = str(event_type or "info")
     if not email or not rid:
         return None
+
+    if _fabric_ready():
+        try:
+            conn = _with_fabric_conn()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT TOP 1 notif_id FROM Tbl_PM_Notifications
+                    WHERE LOWER(recipient_email) = ? AND run_id = ? AND event_type = ?
+                      AND LOWER(is_read) IN ('0', 'false', 'no', 'n')
+                    ORDER BY created_at DESC
+                    """,
+                    (email, rid, et),
+                )
+                existing = cur.fetchone()
+                url = deep_link_for_run(rid)
+                now = _now()
+                title_s = str(title or "Document").strip() or "Document"
+                body_s = str(body or "").strip()
+                actor = str(actor_email or "").strip().lower() or None
+                if existing:
+                    nid = str(existing[0])
+                    cur.execute(
+                        """
+                        UPDATE Tbl_PM_Notifications
+                        SET title = ?, body = ?, actor_email = ?, url = ?, created_at = ?
+                        WHERE notif_id = ?
+                        """,
+                        (title_s, body_s, actor, url, now, nid),
+                    )
+                    conn.commit()
+                    return {
+                        "id": nid,
+                        "recipient_email": email,
+                        "event_type": et,
+                        "run_id": rid,
+                        "title": title_s,
+                        "body": body_s,
+                        "actor_email": actor,
+                        "url": url,
+                        "created_at": now,
+                        "read": False,
+                    }
+            finally:
+                cur.close()
+                conn.close()
+        except Exception as err:
+            logger.warning("Fabric upsert notification notice: %s", err)
+
     with _lock:
         data = _load()
         for i in data.get("items") or []:
@@ -106,6 +191,40 @@ def create_notification(
         "created_at": _now(),
         "read": False,
     }
+
+    if _fabric_ready():
+        try:
+            conn = _with_fabric_conn()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO Tbl_PM_Notifications (
+                        notif_id, recipient_email, event_type, run_id, title, body,
+                        actor_email, url, is_read, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item["id"],
+                        item["recipient_email"],
+                        item["event_type"],
+                        item["run_id"],
+                        item["title"],
+                        item["body"],
+                        item["actor_email"],
+                        item["url"],
+                        "false",
+                        item["created_at"],
+                    ),
+                )
+                conn.commit()
+                return item
+            finally:
+                cur.close()
+                conn.close()
+        except Exception as err:
+            logger.warning("Fabric create notification fallback to JSON: %s", err)
+
     with _lock:
         data = _load()
         data["items"].insert(0, item)
@@ -119,6 +238,43 @@ def list_for_user(email: str, *, unread_only: bool = False, limit: int = 100) ->
     if not em:
         return []
     top = max(1, min(int(limit or 100), 200))
+
+    if _fabric_ready():
+        try:
+            conn = _with_fabric_conn()
+            cur = conn.cursor()
+            try:
+                if unread_only:
+                    cur.execute(
+                        f"""
+                        SELECT TOP {top} notif_id, recipient_email, event_type, run_id, title, body,
+                               actor_email, url, is_read, created_at
+                        FROM Tbl_PM_Notifications
+                        WHERE LOWER(recipient_email) = ?
+                          AND LOWER(is_read) IN ('0', 'false', 'no', 'n')
+                        ORDER BY created_at DESC
+                        """,
+                        (em,),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        SELECT TOP {top} notif_id, recipient_email, event_type, run_id, title, body,
+                               actor_email, url, is_read, created_at
+                        FROM Tbl_PM_Notifications
+                        WHERE LOWER(recipient_email) = ?
+                        ORDER BY created_at DESC
+                        """,
+                        (em,),
+                    )
+                cols = [d[0].lower() for d in cur.description] if cur.description else []
+                return [_row_to_item(dict(zip(cols, r))) for r in cur.fetchall() or []]
+            finally:
+                cur.close()
+                conn.close()
+        except Exception as err:
+            logger.warning("Fabric list notifications fallback to JSON: %s", err)
+
     with _lock:
         items = [dict(i) for i in _load().get("items") or [] if str(i.get("recipient_email") or "").lower() == em]
     if unread_only:
@@ -135,6 +291,28 @@ def mark_read(notif_id: str, email: str) -> bool:
     em = str(email or "").strip().lower()
     if not nid or not em:
         return False
+
+    if _fabric_ready():
+        try:
+            conn = _with_fabric_conn()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    UPDATE Tbl_PM_Notifications SET is_read = 'true'
+                    WHERE notif_id = ? AND LOWER(recipient_email) = ?
+                    """,
+                    (nid, em),
+                )
+                conn.commit()
+                if cur.rowcount and cur.rowcount > 0:
+                    return True
+            finally:
+                cur.close()
+                conn.close()
+        except Exception as err:
+            logger.warning("Fabric mark_read notice: %s", err)
+
     with _lock:
         data = _load()
         found = False
@@ -152,6 +330,28 @@ def mark_all_read(email: str) -> int:
     em = str(email or "").strip().lower()
     if not em:
         return 0
+
+    if _fabric_ready():
+        try:
+            conn = _with_fabric_conn()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    UPDATE Tbl_PM_Notifications SET is_read = 'true'
+                    WHERE LOWER(recipient_email) = ?
+                      AND LOWER(is_read) IN ('0', 'false', 'no', 'n')
+                    """,
+                    (em,),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0)
+            finally:
+                cur.close()
+                conn.close()
+        except Exception as err:
+            logger.warning("Fabric mark_all_read notice: %s", err)
+
     n = 0
     with _lock:
         data = _load()

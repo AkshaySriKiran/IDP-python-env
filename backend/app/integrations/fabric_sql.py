@@ -27,18 +27,21 @@ ALLOWED_TABLES = {
     "Tbl_PM_Audit_Logs",
     "Tbl_PM_Users",
     "Tbl_PM_App_Config",
+    "Tbl_PM_Documents",
+    "Tbl_PM_Extract_Payloads",
+    "Tbl_PM_Notifications",
 }
 
 ALLOWED_COLUMNS = {
     # Core identifiers & run telemetry
     "run_id", "drive_item_id", "etag", "content_hash", "filename", "status", "overall_score",
     "maintenance_count", "spare_parts_count", "troubleshooting_count", "engine", "parse_strategy",
-    "extracted_at", "error",
+    "extracted_at", "error", "envelope_json",
     # Document Metadata (Scenario 6)
     "doc_title", "oem_manufacturer", "equipment_model", "equipment_type",
     "document_version", "publication_date",
     # Document Review & Sign-Off (Scenario 8)
-    "document_status", "approved_by", "approved_at", "rejection_notes",
+    "document_status", "approved_by", "approved_at", "rejection_notes", "submitted_by",
     # User & Execution Telemetry (Scenario 1 & 3)
     "user_id", "user_email", "user_role", "duration_ms", "pages_total", "pages_processed",
     "model_name", "grounding_pass_rate", "filter_drop_rate", "low_confidence_count",
@@ -59,6 +62,10 @@ ALLOWED_COLUMNS = {
     "allowed_models", "password_hash", "assigned_approver", "sharepoint_folder", "updated_at",
     # App Config columns
     "config_key", "config_value",
+    # Documents / payloads (Phases C–D)
+    "canonical_run_id", "global_status", "raw_payload", "edited_payload",
+    # Notifications (Phase E)
+    "notif_id", "recipient_email", "title", "body", "actor_email", "url", "is_read",
 }
 
 _table_column_cache: dict[str, set[str]] = {}

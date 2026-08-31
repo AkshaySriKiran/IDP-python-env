@@ -167,6 +167,9 @@ class TestEnterpriseEnhancements(unittest.TestCase):
         from app.integrations.fabric_sql import ALLOWED_TABLES, ALLOWED_COLUMNS
         assert "Tbl_PM_Audit_Logs" in ALLOWED_TABLES
         assert "Tbl_PM_Extraction_logs" in ALLOWED_TABLES
+        assert "Tbl_PM_Documents" in ALLOWED_TABLES
+        assert "Tbl_PM_Extract_Payloads" in ALLOWED_TABLES
+        assert "Tbl_PM_Notifications" in ALLOWED_TABLES
         assert "doc_title" in ALLOWED_COLUMNS
         assert "oem_manufacturer" in ALLOWED_COLUMNS
         assert "document_status" in ALLOWED_COLUMNS
@@ -174,6 +177,10 @@ class TestEnterpriseEnhancements(unittest.TestCase):
         assert "reviewed_by" in ALLOWED_COLUMNS
         assert "rejection_reason" in ALLOWED_COLUMNS
         assert "user_role" in ALLOWED_COLUMNS
+        assert "envelope_json" in ALLOWED_COLUMNS
+        assert "submitted_by" in ALLOWED_COLUMNS
+        assert "canonical_run_id" in ALLOWED_COLUMNS
+        assert "notif_id" in ALLOWED_COLUMNS
 
     def test_ensure_audit_logs_table_creates_and_inserts(self):
         from unittest.mock import MagicMock, patch

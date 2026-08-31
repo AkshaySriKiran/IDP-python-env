@@ -30,8 +30,9 @@ _LOG_ERROR_MAX_CHARS = 1800
 _LOG_SELECT_CANDIDATES = [
     "run_id", "filename", "content_hash", "drive_item_id", "etag",
     "overall_score", "maintenance_count", "spare_parts_count", "troubleshooting_count",
-    "engine", "parse_strategy", "extracted_at", "error", "status",
+    "engine", "parse_strategy", "extracted_at", "error", "envelope_json", "status",
     "document_status", "user_id", "user_email", "approved_by", "approved_at",
+    "submitted_by", "assigned_approver",
 ]
 
 
@@ -43,9 +44,17 @@ def _log_select_sql(conn: Any, *, top: int = 1) -> str:
     return f"SELECT TOP {max(1, int(top))} {', '.join(cols)} FROM Tbl_PM_Extraction_logs"
 
 
+def _json_dumps(obj: Any) -> str:
+    def _default(o: Any):
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        return str(o)
+    return json.dumps(obj, ensure_ascii=True, default=_default)
+
+
 def _envelope_json_for_log_column(envelope: dict[str, Any], *, max_chars: int = _LOG_ERROR_MAX_CHARS) -> str:
-    """Serialize envelope to fit VARCHAR(2000) `error` column when present."""
-    full = json.dumps(envelope, ensure_ascii=False)
+    """Serialize slim metadata envelope for log columns (payloads live in payloads table)."""
+    full = _json_dumps(envelope)
     if len(full) <= max_chars:
         return full
     slim = {
@@ -59,7 +68,7 @@ def _envelope_json_for_log_column(envelope: dict[str, Any], *, max_chars: int = 
         "doc_metadata": envelope.get("doc_metadata") or {},
         "document_status": envelope.get("document_status"),
         "approved_by": envelope.get("approved_by"),
-        "approved_at": envelope.get("approved_at"),
+        "approved_at": str(envelope.get("approved_at")) if envelope.get("approved_at") is not None else None,
         "submitted_by": envelope.get("submitted_by"),
         "assigned_approver": envelope.get("assigned_approver"),
         "rejection_notes": envelope.get("rejection_notes"),
@@ -75,10 +84,9 @@ def _envelope_json_for_log_column(envelope: dict[str, Any], *, max_chars: int = 
         "duration_ms": envelope.get("duration_ms"),
         "pages_total": envelope.get("pages_total"),
         "pages_processed": envelope.get("pages_processed"),
-        # Row bodies live in Tbl_PM_* tables; omit bulky arrays from the log column.
         "payload_in_row_tables": True,
     }
-    slim_json = json.dumps(slim, ensure_ascii=False)
+    slim_json = _json_dumps(slim)
     if len(slim_json) <= max_chars:
         return slim_json
     return slim_json[: max_chars - 3] + "..."
@@ -111,7 +119,7 @@ def _emit_extract_audit(
             "user_role": user_role,
             "from_status": from_status,
             "to_status": to_status,
-            "details_json": json.dumps(details or {}, ensure_ascii=False),
+            "details_json": json.dumps(details or {}, ensure_ascii=True, default=str),
             "created_at": datetime.now(timezone.utc).replace(tzinfo=None),
         },
     )
@@ -286,6 +294,28 @@ def find_approved_run_by_content_hash(content_hash: str) -> Optional[dict[str, A
         try:
             conn = fabric_sql.connect()
             try:
+                from . import fabric_schema
+
+                fabric_schema.ensure_documents_table(conn)
+                doc = fabric_schema.get_document_by_hash(conn, norm_hash)
+                if doc and _clean_status(doc.get("global_status")) == "Approved" and doc.get("canonical_run_id"):
+                    rid = str(doc["canonical_run_id"])
+                    cur = conn.cursor()
+                    cur.execute(
+                        _log_select_sql(conn, top=1) + " WHERE run_id = ?",
+                        (rid,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        cols = [c[0] for c in cur.description]
+                        out = _apply_log_envelope(dict(zip(cols, row)))
+                        out["document_status"] = "Approved"
+                        out["approved_by"] = doc.get("approved_by") or out.get("approved_by")
+                        out["approved_at"] = doc.get("approved_at") or out.get("approved_at")
+                        cur.close()
+                        return out
+                    cur.close()
+
                 cur = conn.cursor()
                 # Adaptive SELECT — warehouse may not have document_status as a real column.
                 sql = (
@@ -589,37 +619,37 @@ def _clean_status(raw_val: Any) -> str:
 
 
 def _apply_log_envelope(row: dict[str, Any]) -> dict[str, Any]:
-    """Flatten the JSON envelope stored in `error` onto the extraction-log row.
-
-    assigned_approver / submitted_by / document_status live in that envelope on
-    Tbl_PM_Extraction_logs (they are not always real Fabric columns). The
-    pending-approvals bell depends on these fields being present.
-    """
+    """Flatten the JSON envelope stored in `envelope_json` / legacy `error` onto the log row."""
     if not row:
         return row
     for k, v in list(row.items()):
         lk = str(k).lower()
         if lk not in row:
             row[lk] = v
-    raw_env = str(row.get("error") or "").strip()
-    if raw_env.startswith("{") and raw_env.endswith("}"):
-        try:
-            env = json.loads(raw_env)
-            row["document_status"] = env.get("document_status") or row.get("document_status") or "Pending Review"
-            row["approved_by"] = env.get("approved_by") or row.get("approved_by")
-            row["approved_at"] = env.get("approved_at") or row.get("approved_at")
-            row["submitted_by"] = env.get("submitted_by") or row.get("submitted_by") or env.get("user_email")
-            row["assigned_approver"] = env.get("assigned_approver") or row.get("assigned_approver")
-            row["rejection_notes"] = env.get("rejection_notes") or row.get("rejection_notes")
-            row["user_id"] = env.get("user_id") or row.get("user_id")
-            row["user_email"] = env.get("user_email") or row.get("user_email")
-            row["user_role"] = env.get("user_role") or row.get("user_role")
-            doc_meta = env.get("doc_metadata") or {}
-            if doc_meta:
-                row["doc_title"] = doc_meta.get("title") or doc_meta.get("equipment_model") or row.get("doc_title")
-                row["oem_manufacturer"] = doc_meta.get("oem_manufacturer") or row.get("oem_manufacturer")
-        except Exception:
-            pass
+    for key in ("envelope_json", "error"):
+        raw_env = str(row.get(key) or "").strip()
+        if raw_env.startswith("{") and raw_env.endswith("}"):
+            try:
+                env = json.loads(raw_env)
+                if not isinstance(env, dict):
+                    continue
+                row["document_status"] = env.get("document_status") or row.get("document_status") or "Pending Review"
+                row["approved_by"] = env.get("approved_by") or row.get("approved_by")
+                row["approved_at"] = env.get("approved_at") or row.get("approved_at")
+                row["submitted_by"] = env.get("submitted_by") or row.get("submitted_by")
+                row["assigned_approver"] = env.get("assigned_approver") or row.get("assigned_approver")
+                row["user_id"] = env.get("user_id") or row.get("user_id")
+                row["user_email"] = env.get("user_email") or row.get("user_email")
+                row["user_role"] = env.get("user_role") or row.get("user_role")
+                row["rejection_notes"] = env.get("rejection_notes") or row.get("rejection_notes")
+                if env.get("doc_metadata"):
+                    row["doc_metadata"] = env.get("doc_metadata")
+                # Prefer first valid JSON blob; envelope_json is Phase B+ canonical.
+                if key == "envelope_json" or not str(row.get("envelope_json") or "").startswith("{"):
+                    row["_envelope"] = env
+                break
+            except Exception:
+                pass
     if not row.get("document_status"):
         row["document_status"] = "Pending Review"
     else:
@@ -669,20 +699,23 @@ def list_done_extracts(
             cur = conn.cursor()
             known_cols = fabric_sql._get_table_columns(conn, "Tbl_PM_Extraction_logs")
 
-            # Project lightweight summary columns. `error` MUST be included — it
-            # holds the JSON envelope with assigned_approver / submitted_by.
+            # Project lightweight summary columns. Prefer envelope_json (Phase B+);
+            # legacy `error` may still hold an envelope on older rows.
             proj_cols = [
                 "run_id", "filename", "content_hash", "drive_item_id", "etag",
                 "status", "overall_score", "maintenance_count", "spare_parts_count",
                 "troubleshooting_count", "engine", "parse_strategy", "extracted_at",
                 "doc_title", "oem_manufacturer", "equipment_model", "equipment_type",
                 "document_version", "publication_date", "document_status",
-                "approved_by", "approved_at", "assigned_approver", "rejection_notes",
-                "user_id", "user_email", "user_role", "duration_ms", "error",
+                "approved_by", "approved_at", "assigned_approver", "submitted_by",
+                "rejection_notes", "user_id", "user_email", "user_role", "duration_ms",
+                "envelope_json", "error",
             ]
             valid_proj = [c for c in proj_cols if not known_cols or c in known_cols]
             if valid_proj and "error" not in valid_proj and (not known_cols or "error" in known_cols):
                 valid_proj.append("error")
+            if valid_proj and "envelope_json" not in valid_proj and (not known_cols or "envelope_json" in known_cols):
+                valid_proj.append("envelope_json")
             cols_sql = ", ".join(valid_proj) if valid_proj else "*"
 
             if uid or uemail:
@@ -865,18 +898,45 @@ def load_extract_from_fabric(
         if not trouble_raw and cached_fallback.get("troubleshooting"):
             trouble_raw = cached_fallback["troubleshooting"]
 
-    # Check for JSON envelope in error or rejection_notes and merge with cached_fallback
+    # Check for JSON envelope in envelope_json / legacy error and merge with cached_fallback
     envelope = {}
     if cached_fallback:
         envelope.update(cached_fallback)
-    raw_env = str(log_meta.get("error") or "").strip()
-    if raw_env.startswith("{") and raw_env.endswith("}"):
+    for key in ("envelope_json", "error"):
+        raw_env = str(log_meta.get(key) or "").strip()
+        if raw_env.startswith("{") and raw_env.endswith("}"):
+            try:
+                parsed = json.loads(raw_env)
+                if isinstance(parsed, dict):
+                    envelope.update(parsed)
+                    break
+            except Exception:
+                pass
+
+    # Phase C/D: hydrate payloads table when present
+    if fabric_sql.fabric_configured() and (
+        not envelope.get("raw_payload") or not envelope.get("edited_payload")
+        or envelope.get("payload_in_row_tables") or envelope.get("_slim")
+    ):
         try:
-            parsed = json.loads(raw_env)
-            if isinstance(parsed, dict):
-                envelope.update(parsed)
-        except Exception:
-            pass
+            conn = fabric_sql.connect()
+            try:
+                from . import fabric_schema
+
+                payload_row = fabric_schema.load_extract_payloads(conn, run_id)
+                if payload_row:
+                    if payload_row.get("raw_payload") and not envelope.get("raw_payload"):
+                        envelope["raw_payload"] = payload_row["raw_payload"]
+                    if payload_row.get("edited_payload"):
+                        envelope["edited_payload"] = payload_row["edited_payload"]
+                        for coll in ("spare_parts", "maintenance", "troubleshooting"):
+                            edited = payload_row["edited_payload"]
+                            if isinstance(edited, dict) and isinstance(edited.get(coll), list):
+                                envelope[coll] = edited[coll]
+            finally:
+                conn.close()
+        except Exception as err:
+            logger.debug("Fabric payload load notice: %s", err)
 
     # If envelope is empty and Fabric SQL is configured, fetch from Lakehouse
     if not (envelope.get("spare_parts") or envelope.get("raw_payload") or spares_raw or maint_raw or trouble_raw):
@@ -893,14 +953,16 @@ def load_extract_from_fabric(
 
         if not log_meta:
             log_meta = get_done_run(run_id) or {}
-            raw_env = str(log_meta.get("error") or "").strip()
-            if raw_env.startswith("{") and raw_env.endswith("}"):
-                try:
-                    parsed = json.loads(raw_env)
-                    if isinstance(parsed, dict):
-                        envelope.update(parsed)
-                except Exception:
-                    pass
+            for key in ("envelope_json", "error"):
+                raw_env = str(log_meta.get(key) or "").strip()
+                if raw_env.startswith("{") and raw_env.endswith("}"):
+                    try:
+                        parsed = json.loads(raw_env)
+                        if isinstance(parsed, dict):
+                            envelope.update(parsed)
+                            break
+                    except Exception:
+                        pass
 
     # Prioritize edited_payload first, then working arrays, then Lakehouse relational rows, then raw_payload
     edited_p = envelope.get("edited_payload") if isinstance(envelope.get("edited_payload"), dict) else {}
@@ -1578,7 +1640,7 @@ def save_extract_to_fabric(
         "troubleshooting": [dict(r) for r in raw_trouble],
     }
     # Full envelope for local cache; slim JSON for VARCHAR(2000) Fabric `error` column.
-    envelope_json_full = json.dumps(envelope, ensure_ascii=False)
+    envelope_json_full = _json_dumps(envelope)
     envelope_json = _envelope_json_for_log_column(envelope)
 
     raw_engine = str(getattr(result.meta, "engine", "") or "")
@@ -1632,6 +1694,11 @@ def save_extract_to_fabric(
         try:
             conn = fabric_sql.connect()
             try:
+                from . import fabric_schema
+
+                fabric_schema.ensure_phase_b_through_e(conn)
+
+                # Phase B+: real columns + envelope_json. Phase D: do not stuff full JSON into error.
                 fabric_sql.insert_log(
                     conn,
                     {
@@ -1649,7 +1716,8 @@ def save_extract_to_fabric(
                         "engine": engine_with_user,
                         "parse_strategy": str(getattr(result.meta, "parse_strategy", "") or ""),
                         "extracted_at": now,
-                        "error": envelope_json,
+                        "error": None,
+                        "envelope_json": envelope_json,
                         "doc_title": getattr(meta_obj, "title", None) if meta_obj else None,
                         "oem_manufacturer": getattr(meta_obj, "oem_manufacturer", None) if meta_obj else None,
                         "equipment_model": getattr(meta_obj, "equipment_model", None) if meta_obj else None,
@@ -1659,6 +1727,7 @@ def save_extract_to_fabric(
                         "approved_by": approved_by,
                         "approved_at": approved_at,
                         "assigned_approver": assigned_approver,
+                        "submitted_by": user_email,
                         "rejection_notes": rejection_notes,
                         "user_id": user_id,
                         "user_email": user_email,
@@ -1666,6 +1735,39 @@ def save_extract_to_fabric(
                         "duration_ms": duration_ms,
                     },
                 )
+
+                try:
+                    fabric_schema.upsert_extract_payloads(
+                        conn,
+                        run_id=run_id,
+                        content_hash=content_hash,
+                        raw_payload=raw_payload,
+                        edited_payload=edited_payload,
+                    )
+                except Exception as pay_err:
+                    logger.warning("Fabric payloads upsert notice: %s", pay_err)
+
+                try:
+                    global_status = "Approved" if _clean_status(doc_status) == "Approved" else "New"
+                    fabric_schema.upsert_document_row(
+                        conn,
+                        {
+                            "content_hash": content_hash,
+                            "canonical_run_id": run_id if global_status == "Approved" else None,
+                            "filename": filename,
+                            "doc_title": getattr(meta_obj, "title", None) if meta_obj else None,
+                            "oem_manufacturer": getattr(meta_obj, "oem_manufacturer", None) if meta_obj else None,
+                            "equipment_model": getattr(meta_obj, "equipment_model", None) if meta_obj else None,
+                            "equipment_type": getattr(meta_obj, "equipment_type", None) if meta_obj else None,
+                            "document_version": getattr(meta_obj, "document_version", None) if meta_obj else None,
+                            "publication_date": getattr(meta_obj, "publication_date", None) if meta_obj else None,
+                            "global_status": global_status,
+                            "approved_by": approved_by if global_status == "Approved" else None,
+                            "approved_at": str(approved_at) if global_status == "Approved" and approved_at else None,
+                        },
+                    )
+                except Exception as doc_err:
+                    logger.warning("Fabric documents upsert notice: %s", doc_err)
 
                 if result.spare_parts:
                     try:
@@ -1867,7 +1969,7 @@ def update_fabric_review_state(
     if troubleshooting is not None:
         envelope["troubleshooting"] = edited_tr
 
-    updated_env_json = json.dumps(envelope, ensure_ascii=False)
+    updated_env_json = _json_dumps(envelope)
     fabric_env_json = _envelope_json_for_log_column(envelope)
 
     # 1. Update resilient cache
@@ -1977,14 +2079,20 @@ def update_fabric_review_state(
                 # Build UPDATE from columns that actually exist (legacy WH has only ~14 cols).
                 set_parts: list[str] = []
                 params: list[Any] = []
+                if not known_log or "envelope_json" in known_log:
+                    set_parts.append("envelope_json = ?")
+                    params.append(fabric_env_json)
+                # Phase D: clear legacy error blob on successful review sync when envelope_json exists
                 if not known_log or "error" in known_log:
                     set_parts.append("error = ?")
-                    params.append(fabric_env_json)
+                    params.append(None if (not known_log or "envelope_json" in known_log) else fabric_env_json)
                 for col, val in [
                     ("document_status", document_status),
                     ("approved_by", approved_by),
                     ("approved_at", approved_at),
                     ("rejection_notes", rejection_notes),
+                    ("submitted_by", orig_submitted_by),
+                    ("assigned_approver", orig_approver),
                     ("spare_parts_count", sp_cnt),
                     ("maintenance_count", m_cnt),
                     ("troubleshooting_count", t_cnt),
@@ -2005,12 +2113,52 @@ def update_fabric_review_state(
                         tuple(params),
                     )
                 if cur.rowcount == 0:
-                    try:
-                        slim_rec = dict(cached_rec)
-                        slim_rec["error"] = fabric_env_json
-                        fabric_sql.upsert_extraction_log(conn, slim_rec)
-                    except Exception as ins_err:
-                        logger.warning("Failed to upsert extraction log in Fabric: %s", ins_err)
+                    logger.warning("Fabric review-sync UPDATE matched 0 rows for run_id=%s", run_id)
+
+                try:
+                    from . import fabric_schema
+
+                    fabric_schema.ensure_phase_b_through_e(conn)
+                except Exception as schema_err:
+                    logger.warning("Fabric schema ensure notice: %s", schema_err)
+
+                try:
+                    from . import fabric_schema
+
+                    fabric_schema.upsert_extract_payloads(
+                        conn,
+                        run_id=run_id,
+                        content_hash=content_hash,
+                        raw_payload=envelope.get("raw_payload"),
+                        edited_payload=envelope.get("edited_payload"),
+                    )
+                except Exception as pay_err:
+                    logger.warning("Fabric payloads review-sync notice: %s", pay_err)
+
+                try:
+                    from . import fabric_schema
+
+                    if _clean_status(document_status) == "Approved" and content_hash:
+                        fabric_schema.upsert_document_row(
+                            conn,
+                            {
+                                "content_hash": content_hash,
+                                "canonical_run_id": run_id,
+                                "filename": str(log_row.get("filename") or ""),
+                                "doc_title": doc_t,
+                                "oem_manufacturer": doc_o,
+                                "equipment_model": doc_m,
+                                "equipment_type": doc_ty,
+                                "document_version": doc_v,
+                                "publication_date": doc_d,
+                                "global_status": "Approved",
+                                "approved_by": approved_by,
+                                "approved_at": approved_at,
+                            },
+                        )
+                except Exception as doc_err:
+                    logger.warning("Fabric documents review-sync notice: %s", doc_err)
+
                 conn.commit()
                 cur.close()
 
