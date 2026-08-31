@@ -7,6 +7,7 @@ import struct
 import time
 import urllib.parse
 import urllib.request
+from typing import Any
 try:
     import pyodbc
 except ImportError:
@@ -52,7 +53,7 @@ ALLOWED_COLUMNS = {
     # Row Review & Audit
     "reviewed_by", "reviewed_at", "rejection_reason",
     # Audit log columns
-    "event_id", "event_type", "details_json", "created_at",
+    "event_id", "event_type", "from_status", "to_status", "details_json", "created_at",
     # Users Table columns (Fabric User Directory)
     "email", "display_name", "role", "copilot_daily_limit", "preferred_model",
     "allowed_models", "password_hash", "assigned_approver", "sharepoint_folder", "updated_at",
@@ -240,11 +241,85 @@ def insert_many(
     return len(rows)
 
 
+def ensure_audit_logs_table(conn: pyodbc.Connection) -> None:
+    """Ensures Tbl_PM_Audit_Logs exists with Phase A audit columns in Fabric SQL Warehouse."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Tbl_PM_Audit_Logs')
+        BEGIN
+            CREATE TABLE Tbl_PM_Audit_Logs (
+                event_id       VARCHAR(64)  NOT NULL,
+                event_type     VARCHAR(64)  NOT NULL,
+                run_id         VARCHAR(64)  NULL,
+                content_hash   VARCHAR(64)  NULL,
+                filename       VARCHAR(512) NULL,
+                user_id        VARCHAR(64)  NULL,
+                user_email     VARCHAR(255) NULL,
+                user_role      VARCHAR(32)  NULL,
+                from_status    VARCHAR(64)  NULL,
+                to_status      VARCHAR(64)  NULL,
+                details_json   VARCHAR(MAX) NULL,
+                created_at     VARCHAR(64)  NOT NULL
+            )
+        END
+        """)
+        conn.commit()
+        cur.close()
+    except Exception as err:
+        logger.warning("ensure_audit_logs_table create table notice: %s", err)
+
+    for col, col_type in [
+        ("content_hash", "VARCHAR(64)"),
+        ("from_status", "VARCHAR(64)"),
+        ("to_status", "VARCHAR(64)"),
+    ]:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'Tbl_PM_Audit_Logs' AND COLUMN_NAME = '{col}'
+            )
+            BEGIN
+                ALTER TABLE Tbl_PM_Audit_Logs ADD {col} {col_type} NULL;
+            END
+            """)
+            conn.commit()
+            cur.close()
+        except Exception as err:
+            logger.warning("ensure_audit_logs_table add %s notice: %s", col, err)
+
+
+def _audit_created_at(value: Any) -> str:
+    if value is None:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    return str(value)
+
+
 def insert_audit_event(conn: pyodbc.Connection, event: dict[str, Any]) -> None:
-    cols = [c for c in event.keys() if c in ALLOWED_COLUMNS]
+    """Append one row to Tbl_PM_Audit_Logs (creates table if missing)."""
+    ensure_audit_logs_table(conn)
+    row = dict(event)
+    if "created_at" in row:
+        row["created_at"] = _audit_created_at(row["created_at"])
+    cols = [c for c in row.keys() if c in ALLOWED_COLUMNS]
     if not cols:
+        logger.warning("insert_audit_event skipped: no allowed columns in %s", list(event.keys()))
         return
-    insert_many(conn, "Tbl_PM_Audit_Logs", cols, [event])
+    try:
+        insert_many(conn, "Tbl_PM_Audit_Logs", cols, [row])
+        logger.info(
+            "Audit event %s run_id=%s content_hash=%s",
+            row.get("event_type"),
+            row.get("run_id"),
+            row.get("content_hash"),
+        )
+    except Exception as err:
+        logger.warning("insert_audit_event failed: %s", err)
+        raise
 
 
 def ensure_users_table(conn: pyodbc.Connection) -> None:

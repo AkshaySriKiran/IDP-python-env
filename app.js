@@ -182,17 +182,43 @@ function renderIdCellWithDiff(regType, row) {
 function getUserRole() {
   try {
     if (window.authState && window.authState.user && window.authState.user.role) {
-      return window.authState.user.role;
+      return String(window.authState.user.role).toLowerCase();
+    }
+    const raw = sessionStorage.getItem("omniparse_auth_user") || localStorage.getItem("omniparse_auth_user") || localStorage.getItem("idp_user_profile");
+    if (raw) {
+      const u = JSON.parse(raw);
+      if (u && u.role) return String(u.role).toLowerCase();
     }
   } catch (e) {}
-  return "anonymous";
+  return "editor";
+}
+
+function getCurrentUserEmail() {
+  try {
+    if (window.authState && window.authState.user && window.authState.user.email) {
+      return String(window.authState.user.email).toLowerCase();
+    }
+    const raw = sessionStorage.getItem("omniparse_auth_user") || localStorage.getItem("omniparse_auth_user") || localStorage.getItem("idp_user_profile");
+    if (raw) {
+      const u = JSON.parse(raw);
+      if (u && u.email) return String(u.email).toLowerCase();
+    }
+  } catch (e) {}
+  return "";
 }
 
 function canApproveOrSignOff() {
   const role = getUserRole();
-  if (role === "admin" || role === "approver") return true;
-  if (role === "editor" || role === "viewer" || role === "user") return false;
-  return true;
+  if (role === "admin") return true;
+  if (role !== "approver") return false;
+  const userEmail = (getCurrentUserEmail() || "").trim().toLowerCase();
+  const docApprover = String(
+    (lastExtractMeta && lastExtractMeta.assigned_approver) ||
+    (activeDocumentMetadata && activeDocumentMetadata.assigned_approver) ||
+    ""
+  ).trim().toLowerCase();
+  if (!userEmail || !docApprover) return false;
+  return docApprover === userEmail;
 }
 
 function canEditRecords() {
@@ -1306,6 +1332,9 @@ function applyApiExtractResult(result, file) {
     lastExtractMeta = meta;
     activeFabricRunId = meta.run_id || (result && result.run_id) || (result && result.fabric_run_id) || activeFabricRunId || null;
     activeDocumentMetadata = meta.doc_metadata || (result && result.doc_metadata) || null;
+    if (meta.assigned_approver) {
+      activeDocumentMetadata = Object.assign({}, activeDocumentMetadata || {}, { assigned_approver: meta.assigned_approver });
+    }
     activeDocumentStatus = meta.document_status || (result && result.document_status) || "Pending Review";
     activeApprovedBy = meta.approved_by || (result && result.approved_by) || null;
     activeApprovedAt = meta.approved_at || (result && result.approved_at) || null;
@@ -1378,6 +1407,15 @@ function applyApiExtractResult(result, file) {
     }
 
     (meta.warnings || []).forEach(w => appendChatSystemMessage(`⚠️ ${w}`));
+
+    if (meta.already_approved) {
+      const who = meta.prior_approved_by || activeApprovedBy || "an approver";
+      const when = meta.prior_approved_at || activeApprovedAt ? ` on ${meta.prior_approved_at || activeApprovedAt}` : "";
+      const prompt = activeDocumentStatus === "Approved"
+        ? `This document was already signed off by ${who}${when}. Review is complete — no further action required.`
+        : `This document was already signed off by ${who}${when}. A new pending copy was created for your workspace. The original AI extraction is preserved as the audit baseline.`;
+      try { window.alert(prompt); } catch (e) {}
+    }
 
     if (progressFill) progressFill.style.width = "100%";
     if (progressStatus) progressStatus.innerText = "Extraction finished!";
@@ -2521,6 +2559,9 @@ function renderGrid() {
   syncRegistryFilterTabs();
   
   updateDiffToolbarButtons();
+  if (typeof updateRoleActionButtons === "function") {
+    updateRoleActionButtons();
+  }
   safeCreateIcons();
   attachTableListeners();
   updateDashboardMetrics();
@@ -2591,10 +2632,13 @@ function attachTableListeners() {
             localStorage.setItem("omniparse_learned_patterns", JSON.stringify(learnedPatterns));
           } catch(e) {}
 
-          if (activeDocumentStatus === "Pending Review" || activeDocumentStatus === "Needs Revision" || activeDocumentStatus === "Rejected") {
+          if (activeDocumentStatus !== "Approved" || !canApproveOrSignOff()) {
             activeDocumentStatus = "In Review";
             updateDocMetadataBadge();
             if (typeof updateRoleActionButtons === "function") updateRoleActionButtons();
+          }
+          if (typeof triggerAutoSaveDebounce === "function") {
+            triggerAutoSaveDebounce();
           }
         }
         renderGrid();
@@ -4463,16 +4507,68 @@ function getRegistryArray(regType) {
   return activeRegistryTab === "spare_parts" ? sparePartsRegistry : (activeRegistryTab === "troubleshooting" ? troubleshootingRegistry : maintenanceRegistry);
 }
 
-function getCurrentUserEmail() {
-  try {
-    if (window.authState && window.authState.user && window.authState.user.email) {
-      return window.authState.user.email;
-    }
-  } catch (e) {}
-  return "Authorized Reviewer";
+let activeFabricRunId = null;
+let autoSaveDebounceTimer = null;
+let reviewSyncDebounceTimer = null;
+
+function scheduleReviewSync(delayMs = 800) {
+  if (reviewSyncDebounceTimer) clearTimeout(reviewSyncDebounceTimer);
+  reviewSyncDebounceTimer = setTimeout(() => {
+    reviewSyncDebounceTimer = null;
+    syncReviewStateToFabric();
+  }, delayMs);
 }
 
-let activeFabricRunId = null;
+function triggerAutoSaveDebounce() {
+  if (autoSaveDebounceTimer) clearTimeout(autoSaveDebounceTimer);
+  autoSaveDebounceTimer = setTimeout(() => {
+    saveWorkspaceEdits(true);
+  }, 1200);
+}
+
+async function saveWorkspaceEdits(isAutoSave = false) {
+  const allRows = [...maintenanceRegistry, ...sparePartsRegistry, ...troubleshootingRegistry];
+  if (allRows.length === 0) return;
+
+  if (activeDocumentStatus === "Approved" || activeDocumentStatus === "Pending Review" || !activeDocumentStatus) {
+    activeDocumentStatus = "In Review";
+    updateDocMetadataBadge();
+  }
+
+  const saveBtn = document.getElementById("save-changes-btn");
+  const origHtml = saveBtn ? saveBtn.innerHTML : "";
+  if (saveBtn && !isAutoSave) {
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = `<i data-lucide="loader-2" class="spin"></i><span>Saving…</span>`;
+    if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+  }
+
+  try {
+    const resp = await syncReviewStateToFabric();
+    if (saveBtn && !isAutoSave) {
+      saveBtn.innerHTML = `<i data-lucide="check"></i><span>Saved ✓</span>`;
+      if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+      setTimeout(() => {
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.innerHTML = origHtml;
+          if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+        }
+      }, 1500);
+    }
+    if (!isAutoSave) {
+      appendChatSystemMessage(`Workspace edits saved to Microsoft Fabric (Status: **${activeDocumentStatus}**).`);
+    }
+    return resp;
+  } catch (err) {
+    if (saveBtn && !isAutoSave) {
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = origHtml;
+      if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+    }
+    console.error("Save workspace edits error:", err);
+  }
+}
 
 async function syncReviewStateToFabric() {
   if (!activeFabricRunId && lastExtractMeta && lastExtractMeta.run_id) {
@@ -4482,20 +4578,38 @@ async function syncReviewStateToFabric() {
     console.debug("No active Fabric run ID to sync review state.");
     return;
   }
+
+  const sanitizeRow = (r) => {
+    if (!r || typeof r !== "object") return {};
+    const cleaned = { ...r };
+    if (cleaned.confidence !== undefined) {
+      const num = parseFloat(cleaned.confidence);
+      cleaned.confidence = isNaN(num) ? 1.0 : num;
+    }
+    return cleaned;
+  };
+
   try {
     const headers = { "Content-Type": "application/json" };
     if (typeof window.getAuthHeaders === "function") {
       Object.assign(headers, window.getAuthHeaders());
     }
+
+    let syncStatus = activeDocumentStatus || "Pending Review";
+    if (!canApproveOrSignOff() && syncStatus === "Approved") {
+      syncStatus = "In Review";
+      activeDocumentStatus = "In Review";
+    }
+
     const payload = {
-      document_status: activeDocumentStatus || "Pending Review",
+      document_status: syncStatus,
       approved_by: activeApprovedBy || getCurrentUserEmail(),
-      approved_at: activeApprovedAt || (activeDocumentStatus === "Approved" ? new Date().toISOString() : null),
-      rejection_notes: activeDocumentStatus === "Needs Revision" ? "Flagged during technical review" : null,
+      approved_at: activeApprovedAt || (syncStatus === "Approved" ? new Date().toISOString() : null),
+      rejection_notes: syncStatus === "Needs Revision" ? "Flagged during technical review" : null,
       doc_metadata: activeDocumentMetadata || null,
-      spare_parts: Array.isArray(sparePartsRegistry) ? sparePartsRegistry : [],
-      maintenance: Array.isArray(maintenanceRegistry) ? maintenanceRegistry : [],
-      troubleshooting: Array.isArray(troubleshootingRegistry) ? troubleshootingRegistry : [],
+      spare_parts: Array.isArray(sparePartsRegistry) ? sparePartsRegistry.map(sanitizeRow) : [],
+      maintenance: Array.isArray(maintenanceRegistry) ? maintenanceRegistry.map(sanitizeRow) : [],
+      troubleshooting: Array.isArray(troubleshootingRegistry) ? troubleshootingRegistry.map(sanitizeRow) : [],
     };
     const resp = await fetch(`${apiBaseUrl}/api/fabric/extracts/${encodeURIComponent(activeFabricRunId)}/review-sync`, {
       method: "POST",
@@ -4504,6 +4618,7 @@ async function syncReviewStateToFabric() {
     });
     if (resp.ok) {
       console.log("Fabric review state & workspace records synced successfully:", payload.document_status);
+      if (typeof updateDiffToolbarButtons === "function") updateDiffToolbarButtons();
     } else {
       const errJson = await resp.json().catch(() => ({}));
       console.warn("Fabric review sync warning:", resp.status, errJson);
@@ -4528,7 +4643,7 @@ function approveRow(regType, rowId) {
     delete row.rejection_reason;
     renderGridPreservingScroll();
     checkAutoUpdateDocumentStatus();
-    syncReviewStateToFabric();
+    scheduleReviewSync();
   }
 }
 
@@ -4568,7 +4683,7 @@ function confirmRejection() {
     row.reviewed_at = new Date().toISOString();
     renderGridPreservingScroll();
     checkAutoUpdateDocumentStatus();
-    syncReviewStateToFabric();
+    scheduleReviewSync();
   }
   closeRejectionModal();
 }
@@ -4630,7 +4745,9 @@ function updateDocMetadataBadge() {
   if (!badge) return;
   if (activeDocumentMetadata || lastExtractMeta) {
     badge.style.display = "inline-flex";
-    const statusText = activeDocumentStatus === "Approved" ? "✓ Approved" : "Sign-Off";
+    const statusText = activeDocumentStatus === "Approved"
+      ? (lastExtractMeta && lastExtractMeta.already_approved ? "✓ Already Approved" : "✓ Approved")
+      : "Sign-Off";
     const title = (activeDocumentMetadata && activeDocumentMetadata.equipment_model) || (activeDocumentMetadata && activeDocumentMetadata.title) || "Metadata";
     if (textEl) textEl.textContent = `${title} (${statusText})`;
   } else {
@@ -4801,22 +4918,31 @@ function updateRoleActionButtons() {
   const allowApprove = canApproveOrSignOff();
   const signoffBtn = document.getElementById("signoff-btn");
   const signoffAllBtn = document.getElementById("signoff-all-btn");
+  const saveBtn = document.getElementById("save-changes-btn");
+
+  const totalRecords = maintenanceRegistry.length + sparePartsRegistry.length + troubleshootingRegistry.length;
+
+  if (saveBtn) {
+    saveBtn.style.display = totalRecords > 0 ? "inline-flex" : "none";
+  }
 
   if (signoffAllBtn) {
-    signoffAllBtn.style.display = allowApprove ? "inline-flex" : "none";
+    signoffAllBtn.style.display = (allowApprove && totalRecords > 0) ? "inline-flex" : "none";
   }
 
   if (signoffBtn) {
+    signoffBtn.style.display = totalRecords > 0 ? "inline-flex" : "none";
     if (allowApprove) {
       signoffBtn.title = "Sync review status and partial sign-off to Microsoft Fabric";
-      signoffBtn.innerHTML = `<i data-lucide="check-check"></i><span>Sign-Off</span>`;
+      signoffBtn.innerHTML = `<i data-lucide="check"></i><span>Sign-Off</span>`;
     } else {
       signoffBtn.title = "Submit workspace changes for approver review";
       signoffBtn.innerHTML = `<i data-lucide="send"></i><span>Submit for Review</span>`;
     }
-    if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
   }
+  if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
 }
+window.updateRoleActionButtons = updateRoleActionButtons;
 
 // Wire review toolbar and modal event listeners
 const statusFilterSelect = document.getElementById("status-filter");
@@ -4824,6 +4950,14 @@ if (statusFilterSelect) {
   statusFilterSelect.addEventListener("change", (e) => {
     currentStatusFilter = e.target.value;
     renderGridPreservingScroll();
+  });
+}
+
+const saveChangesBtn = document.getElementById("save-changes-btn");
+if (saveChangesBtn) {
+  saveChangesBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    saveWorkspaceEdits(false);
   });
 }
 
@@ -5118,93 +5252,131 @@ async function loadFabricRunFromQuery() {
   }
 }
 
-/* ---------------- Approver Pending Approvals Notifications ---------------- */
+/* ---------------- Persistent in-app notifications ---------------- */
 let pendingApprovalsTimer = null;
 let cachedPendingApprovals = [];
+let cachedNotifications = [];
 
-async function fetchPendingApprovals() {
-  const role = getUserRole();
-  const notifWrap = document.getElementById("approvals-notif-wrap");
-  if (role !== "approver" && role !== "admin") {
-    if (notifWrap) notifWrap.hidden = true;
+function notificationDeepLink(runId) {
+  const rid = encodeURIComponent(String(runId || "").trim());
+  return `index.html?fabric_run_id=${rid}`;
+}
+
+async function markNotificationRead(notifId) {
+  if (!notifId) return;
+  try {
+    const headers = typeof window.getAuthHeaders === "function" ? window.getAuthHeaders() : {};
+    await fetch(`${apiBaseUrl}/api/notifications/${encodeURIComponent(notifId)}/read`, {
+      method: "POST",
+      headers,
+    });
+  } catch (e) {}
+}
+
+async function fetchNotifications() {
+  if (typeof window.isLoggedIn === "function" && !window.isLoggedIn()) {
     return;
   }
-  if (notifWrap) notifWrap.hidden = false;
 
   try {
     const headers = typeof window.getAuthHeaders === "function" ? window.getAuthHeaders() : {};
-    const resp = await fetch(`${apiBaseUrl}/api/fabric/pending-approvals`, { headers });
+    const resp = await fetch(`${apiBaseUrl}/api/notifications`, { headers });
     if (!resp.ok) return;
     const data = await resp.json().catch(() => ({}));
     const items = Array.isArray(data.items) ? data.items : [];
-    cachedPendingApprovals = items;
-    renderPendingApprovalsUi(items);
+    cachedNotifications = items;
+    cachedPendingApprovals = items.filter(n => n.event_type === "submitted" && !n.read);
+    renderNotificationsUi(items, Number(data.unread || 0));
   } catch (err) {
-    console.debug("Pending approvals fetch error:", err);
+    console.debug("Notifications fetch error:", err);
   }
 }
-window.fetchPendingApprovals = fetchPendingApprovals;
 
-function renderPendingApprovalsUi(items) {
+async function fetchPendingApprovals() {
+  return fetchNotifications();
+}
+window.fetchPendingApprovals = fetchPendingApprovals;
+window.fetchNotifications = fetchNotifications;
+
+function notificationEventLabel(eventType) {
+  switch (String(eventType || "")) {
+    case "submitted": return "Submitted for review";
+    case "signed_off": return "Signed off";
+    case "revision_requested": return "Revision requested";
+    case "already_approved": return "Previously signed off";
+    default: return "Update";
+  }
+}
+
+function renderNotificationsUi(items, unreadOverride) {
   const countBadge = document.getElementById("approvals-notif-count");
   const bellBtn = document.getElementById("approvals-notif-btn");
   const headerBadge = document.getElementById("approvals-header-badge");
   const listEl = document.getElementById("approvals-dropdown-list");
 
-  const count = items.length;
+  const unread = typeof unreadOverride === "number"
+    ? unreadOverride
+    : items.filter(n => !n.read).length;
   if (countBadge) {
-    countBadge.textContent = String(count);
-    countBadge.hidden = count === 0;
+    countBadge.textContent = String(unread);
+    countBadge.hidden = unread === 0;
   }
   if (bellBtn) {
-    bellBtn.classList.toggle("has-pending", count > 0);
+    bellBtn.classList.toggle("has-pending", unread > 0);
   }
   if (headerBadge) {
-    headerBadge.textContent = `${count} Pending`;
+    headerBadge.textContent = unread === 1 ? "1 New" : `${unread} New`;
   }
 
   if (!listEl) return;
 
-  if (count === 0) {
-    listEl.innerHTML = `<div class="approvals-empty"><i data-lucide="check-circle-2" style="width: 28px; height: 28px; color: var(--accent-green, #10b981); margin-bottom: 0.5rem; display: inline-block;"></i><br>All documents have been reviewed and approved.</div>`;
+  if (!items.length) {
+    listEl.innerHTML = `<div class="approvals-empty"><i data-lucide="check-circle-2" style="width: 28px; height: 28px; color: var(--accent-green, #10b981); margin-bottom: 0.5rem; display: inline-block;"></i><br>No notifications</div>`;
     if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
     return;
   }
 
-  listEl.innerHTML = items.map(doc => {
-    const totalRecords = (doc.maintenance_count || 0) + (doc.spare_parts_count || 0) + (doc.troubleshooting_count || 0);
-    const docName = doc.doc_title || doc.filename || "Untitled Document";
-    const status = doc.document_status || "Pending Review";
-    const submitter = doc.submitted_by ? `By: ${escapeHTML(doc.submitted_by)}` : (doc.extracted_at ? `Extracted ${escapeHTML(doc.extracted_at)}` : "Pending");
-
+  const role = getUserRole();
+  const canQuickApprove = role === "admin" || role === "approver";
+  listEl.innerHTML = items.map(n => {
+    const runId = n.run_id || "";
+    const docName = n.title || "Untitled Document";
+    const href = n.url || notificationDeepLink(runId);
+    const eventLabel = notificationEventLabel(n.event_type);
+    const actor = n.actor_email ? `From ${escapeHTML(n.actor_email)}` : "";
+    const unreadClass = n.read ? "" : " is-unread";
+    const showApprove = n.event_type === "submitted" && canQuickApprove && runId;
     return `
-      <div class="approvals-item" data-run-id="${escapeHTML(doc.run_id)}">
+      <div class="approvals-item${unreadClass}" data-run-id="${escapeHTML(runId)}" data-notif-id="${escapeHTML(n.id || "")}">
         <div class="approvals-item-top">
           <div class="approvals-item-name" title="${escapeHTML(docName)}">
             <i data-lucide="file-text" style="width: 14px; height: 14px; display: inline-block; vertical-align: -2px; margin-right: 4px; color: var(--accent-cyan, #06b6d4);"></i>
             ${escapeHTML(docName)}
           </div>
-          <span class="status-pill status-pending" style="font-size: 0.68rem; padding: 0.1rem 0.4rem;">${escapeHTML(status)}</span>
+          <span class="status-pill status-pending" style="font-size: 0.68rem; padding: 0.1rem 0.4rem;">${escapeHTML(eventLabel)}</span>
         </div>
         <div class="approvals-item-meta">
-          <span>${submitter}</span>
-          <span><strong>${totalRecords}</strong> records</span>
+          <span>${actor || escapeHTML(n.body || "")}</span>
         </div>
         <div class="approvals-item-actions">
-          <button type="button" class="btn btn-sm btn-secondary approvals-review-btn" data-run-id="${escapeHTML(doc.run_id)}" title="Open and inspect in workspace">
+          <a class="btn btn-sm btn-secondary approvals-review-btn notif-deeplink" href="${escapeHTML(href)}" data-run-id="${escapeHTML(runId)}" data-notif-id="${escapeHTML(n.id || "")}" title="Open document">
             <i data-lucide="external-link"></i>
-            <span>Open &amp; Review</span>
-          </button>
-          <button type="button" class="btn btn-sm btn-primary approvals-quick-approve-btn" data-run-id="${escapeHTML(doc.run_id)}" title="Approve document">
+            <span>Open</span>
+          </a>
+          ${showApprove ? `<button type="button" class="btn btn-sm btn-primary approvals-quick-approve-btn" data-run-id="${escapeHTML(runId)}" data-notif-id="${escapeHTML(n.id || "")}" title="Approve document">
             <i data-lucide="check"></i>
             <span>Approve</span>
-          </button>
+          </button>` : ""}
         </div>
       </div>
     `;
   }).join("");
 
   if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
+}
+
+function renderPendingApprovalsUi(items) {
+  renderNotificationsUi(items || cachedNotifications);
 }
 
 function initApprovalsNotificationUi() {
@@ -5218,7 +5390,7 @@ function initApprovalsNotificationUi() {
       const willOpen = dropdown.hidden;
       dropdown.hidden = !willOpen;
       notifBtn.setAttribute("aria-expanded", String(willOpen));
-      if (willOpen) fetchPendingApprovals();
+      if (willOpen) fetchNotifications();
     });
 
     document.addEventListener("click", (e) => {
@@ -5231,12 +5403,22 @@ function initApprovalsNotificationUi() {
 
   if (listEl) {
     listEl.addEventListener("click", async (e) => {
-      const reviewBtn = e.target.closest(".approvals-review-btn");
+      const reviewBtn = e.target.closest(".approvals-review-btn, .notif-deeplink");
       if (reviewBtn) {
+        e.preventDefault();
         e.stopPropagation();
         const runId = reviewBtn.getAttribute("data-run-id");
+        const notifId = reviewBtn.getAttribute("data-notif-id");
         if (dropdown) dropdown.hidden = true;
-        await loadFabricExtract(runId);
+        if (notifId) markNotificationRead(notifId);
+        if (runId) {
+          try {
+            const url = new URL(window.location.href);
+            url.searchParams.set("fabric_run_id", runId);
+            window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+          } catch (err) {}
+          await loadFabricExtract(runId);
+        }
         return;
       }
 
@@ -5244,6 +5426,7 @@ function initApprovalsNotificationUi() {
       if (approveBtn) {
         e.stopPropagation();
         const runId = approveBtn.getAttribute("data-run-id");
+        const notifId = approveBtn.getAttribute("data-notif-id");
         approveBtn.disabled = true;
         approveBtn.innerHTML = `<i data-lucide="loader-2" class="spin"></i><span>Approving…</span>`;
         if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
@@ -5265,7 +5448,7 @@ function initApprovalsNotificationUi() {
             const err = await resp.json().catch(() => ({}));
             throw new Error(err.detail || `HTTP ${resp.status}`);
           }
-          // If currently loaded in workspace, update workspace state
+          if (notifId) markNotificationRead(notifId);
           if (activeFabricRunId === runId) {
             activeDocumentStatus = "Approved";
             activeApprovedBy = email;
@@ -5281,7 +5464,7 @@ function initApprovalsNotificationUi() {
             renderGridPreservingScroll();
             appendChatSystemMessage(`Document and all records approved by **${email}**.`);
           }
-          await fetchPendingApprovals();
+          await fetchNotifications();
         } catch (err) {
           alert("Approval failed: " + (err.message || err));
           approveBtn.disabled = false;
@@ -5290,10 +5473,8 @@ function initApprovalsNotificationUi() {
     });
   }
 
-  // Poll for pending approvals every 30 seconds
-  fetchPendingApprovals();
   if (pendingApprovalsTimer) clearInterval(pendingApprovalsTimer);
-  pendingApprovalsTimer = setInterval(fetchPendingApprovals, 30000);
+  pendingApprovalsTimer = setInterval(fetchNotifications, 30000);
 }
 
 /* -------------------------------------------------------------
@@ -5306,6 +5487,7 @@ function getDiffStatistics() {
       totalAlterations: 0,
       cellsModified: 0,
       rowsAdded: 0,
+      rowsDeleted: 0,
       spChanges: 0,
       mtChanges: 0,
       trChanges: 0,
@@ -5317,6 +5499,7 @@ function getDiffStatistics() {
   let totalAlterations = 0;
   let cellsModified = 0;
   let rowsAdded = 0;
+  let rowsDeleted = 0;
 
   const detailed = { spare_parts: [], maintenance: [], troubleshooting: [], metadata: [] };
 
@@ -5324,6 +5507,7 @@ function getDiffStatistics() {
     const baseList = (baselineExtraction && baselineExtraction[regType]) || [];
     let count = 0;
     const cols = CANONICAL_DIFF_COLUMNS[regType] || [];
+    const matchedBaseIdx = new Set();
 
     currentList.forEach((curr, idx) => {
       const base = getBaselineRow(regType, curr, idx);
@@ -5337,10 +5521,13 @@ function getDiffStatistics() {
           id: curr.id || idx + 1,
           equipment_title: curr.equipment_title || "NA",
           isNew: true,
+          isDeleted: false,
           row: curr,
           changes: [],
         });
       } else {
+        const bIdx = baseList.indexOf(base);
+        if (bIdx >= 0) matchedBaseIdx.add(bIdx);
         const rowChanges = [];
 
         cols.forEach(col => {
@@ -5364,12 +5551,29 @@ function getDiffStatistics() {
             id: curr.id || idx + 1,
             equipment_title: curr.equipment_title || base.equipment_title || "NA",
             isNew: false,
+            isDeleted: false,
             row: curr,
             baseRow: base,
             changes: rowChanges,
           });
         }
       }
+    });
+
+    baseList.forEach((base, bIdx) => {
+      if (matchedBaseIdx.has(bIdx)) return;
+      rowsDeleted++;
+      totalAlterations++;
+      count++;
+      detailed[regType].push({
+        id: base.id || bIdx + 1,
+        equipment_title: base.equipment_title || "NA",
+        isNew: false,
+        isDeleted: true,
+        row: null,
+        baseRow: base,
+        changes: [],
+      });
     });
 
     return count;
@@ -5406,7 +5610,7 @@ function getDiffStatistics() {
     }
   });
 
-  return { totalAlterations, cellsModified, rowsAdded, spChanges, mtChanges, trChanges, metaChanges, detailed };
+  return { totalAlterations, cellsModified, rowsAdded, rowsDeleted, spChanges, mtChanges, trChanges, metaChanges, detailed };
 }
 
 function updateDiffToolbarButtons() {
@@ -5444,6 +5648,7 @@ function renderDiffModalContent(activeTab, changesOnly = true) {
   const totalEl = document.getElementById("diff-stat-total");
   const modEl = document.getElementById("diff-stat-modified");
   const addEl = document.getElementById("diff-stat-added");
+  const delEl = document.getElementById("diff-stat-deleted");
   const spEl = document.getElementById("diff-tab-count-sp");
   const mtEl = document.getElementById("diff-tab-count-mt");
   const trEl = document.getElementById("diff-tab-count-tr");
@@ -5452,6 +5657,7 @@ function renderDiffModalContent(activeTab, changesOnly = true) {
   if (totalEl) totalEl.innerText = stats.totalAlterations;
   if (modEl) modEl.innerText = stats.cellsModified;
   if (addEl) addEl.innerText = stats.rowsAdded;
+  if (delEl) delEl.innerText = stats.rowsDeleted || 0;
   if (spEl) spEl.innerText = stats.spChanges;
   if (mtEl) mtEl.innerText = stats.mtChanges;
   if (trEl) trEl.innerText = stats.trChanges;
@@ -5507,7 +5713,25 @@ function renderDiffModalContent(activeTab, changesOnly = true) {
 
   let html = "";
   rows.forEach(r => {
-    if (r.isNew) {
+    if (r.isDeleted) {
+      const base = r.baseRow || {};
+      html += `
+        <div class="diff-row-card" style="border-left: 3px solid #ef4444;">
+          <div class="diff-row-header">
+            <span>#${r.id} &mdash; ${escapeHTML(r.equipment_title)}</span>
+            <span class="diff-badge-custom-row" style="background: hsla(0, 85%, 60%, 0.15); color: #ef4444;">− Deleted from working set</span>
+          </div>
+          <div class="diff-row-changes-grid">
+            <div class="diff-field-card" style="grid-column: 1 / -1;">
+              <div class="diff-field-name">Original AI Baseline Record (removed)</div>
+              <div style="font-size: 0.82rem; color: var(--text-main); display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.25rem;">
+                ${Object.entries(base).filter(([k]) => !['id','pdf_order','quality','confidence','status','reviewed_by','reviewed_at','rejection_reason'].includes(k) && !k.startsWith('_')).map(([k, v]) => `<div><strong style="color: var(--text-muted);">${formatColumnLabel(k)}:</strong> ${escapeHTML(String(v || 'NA'))}</div>`).join('')}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (r.isNew) {
       html += `
         <div class="diff-row-card" style="border-left: 3px solid #10b981;">
           <div class="diff-row-header">

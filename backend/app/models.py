@@ -32,6 +32,9 @@ class RowQuality(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+from pydantic import BaseModel, Field, field_validator
+
+
 class MaintenanceRow(BaseModel):
     id: int = 0
     equipment_title: str = "NA"
@@ -45,12 +48,46 @@ class MaintenanceRow(BaseModel):
     remarks: str = "NA"
     page: Any = "NA"
     pdf_order: int = 0
-    confidence: float = 1.0
-    quality: Optional[RowQuality] = None
-    status: ReviewStatus = "Pending Review"
+    confidence: Any = 1.0
+    quality: Optional[Any] = None
+    status: str = "Pending Review"
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
     rejection_reason: Optional[str] = None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _parse_confidence(cls, v: Any) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return 1.0
+
+    @field_validator("id", "pdf_order", mode="before")
+    @classmethod
+    def _parse_ints(cls, v: Any) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return 0
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _parse_status(cls, v: Any) -> str:
+        s = str(v or "").strip()
+        if s in {"Draft", "Pending Review", "In Review", "Pending Sign-Off", "Approved", "Rejected", "Needs Revision"}:
+            return s
+        if s.lower() in {"approved", "signed off", "signed-off"}:
+            return "Approved"
+        if s.lower() in {"rejected", "reject"}:
+            return "Rejected"
+        if s.lower() in {"in review", "in-review", "reviewing"}:
+            return "In Review"
+        if s.lower() in {"pending sign-off", "pending sign off", "pending-sign-off"}:
+            return "Pending Sign-Off"
+        if s.lower() in {"needs revision", "revision"}:
+            return "Needs Revision"
+        return "Pending Review"
 
 
 class SparePartRow(BaseModel):
@@ -69,12 +106,46 @@ class SparePartRow(BaseModel):
     frequency_of_use: str = "NA"
     page: Any = "NA"
     pdf_order: int = 0
-    confidence: float = 1.0
-    quality: Optional[RowQuality] = None
-    status: ReviewStatus = "Pending Review"
+    confidence: Any = 1.0
+    quality: Optional[Any] = None
+    status: str = "Pending Review"
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
     rejection_reason: Optional[str] = None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _parse_confidence(cls, v: Any) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return 1.0
+
+    @field_validator("id", "pdf_order", mode="before")
+    @classmethod
+    def _parse_ints(cls, v: Any) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return 0
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _parse_status(cls, v: Any) -> str:
+        s = str(v or "").strip()
+        if s in {"Draft", "Pending Review", "In Review", "Pending Sign-Off", "Approved", "Rejected", "Needs Revision"}:
+            return s
+        if s.lower() in {"approved", "signed off", "signed-off"}:
+            return "Approved"
+        if s.lower() in {"rejected", "reject"}:
+            return "Rejected"
+        if s.lower() in {"in review", "in-review", "reviewing"}:
+            return "In Review"
+        if s.lower() in {"pending sign-off", "pending sign off", "pending-sign-off"}:
+            return "Pending Sign-Off"
+        if s.lower() in {"needs revision", "revision"}:
+            return "Needs Revision"
+        return "Pending Review"
 
 
 class TroubleshootingRow(BaseModel):
@@ -85,12 +156,46 @@ class TroubleshootingRow(BaseModel):
     root_cause_solution: str = "NA"
     page: Any = "NA"
     pdf_order: int = 0
-    confidence: float = 1.0
-    quality: Optional[RowQuality] = None
-    status: ReviewStatus = "Pending Review"
+    confidence: Any = 1.0
+    quality: Optional[Any] = None
+    status: str = "Pending Review"
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
     rejection_reason: Optional[str] = None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _parse_confidence(cls, v: Any) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return 1.0
+
+    @field_validator("id", "pdf_order", mode="before")
+    @classmethod
+    def _parse_ints(cls, v: Any) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return 0
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _parse_status(cls, v: Any) -> str:
+        s = str(v or "").strip()
+        if s in {"Draft", "Pending Review", "In Review", "Pending Sign-Off", "Approved", "Rejected", "Needs Revision"}:
+            return s
+        if s.lower() in {"approved", "signed off", "signed-off"}:
+            return "Approved"
+        if s.lower() in {"rejected", "reject"}:
+            return "Rejected"
+        if s.lower() in {"in review", "in-review", "reviewing"}:
+            return "In Review"
+        if s.lower() in {"pending sign-off", "pending sign off", "pending-sign-off"}:
+            return "Pending Sign-Off"
+        if s.lower() in {"needs revision", "revision"}:
+            return "Needs Revision"
+        return "Pending Review"
 
 
 class PageText(BaseModel):
@@ -117,7 +222,12 @@ class ExtractMeta(BaseModel):
     document_status: ReviewStatus = "Pending Review"
     approved_by: Optional[str] = None
     approved_at: Optional[str] = None
+    assigned_approver: Optional[str] = None
+    submitted_by: Optional[str] = None
     has_diff: Optional[bool] = False
+    already_approved: bool = False
+    prior_approved_by: Optional[str] = None
+    prior_approved_at: Optional[str] = None
 
 
 class BaselineExtraction(BaseModel):
@@ -209,14 +319,32 @@ class FabricExtractListResponse(BaseModel):
 
 
 class FabricReviewSyncRequest(BaseModel):
-    document_status: ReviewStatus = "Pending Review"
+    document_status: str = "Pending Review"
     approved_by: Optional[str] = None
     approved_at: Optional[str] = None
     rejection_notes: Optional[str] = None
     doc_metadata: Optional[DocumentMetadata] = None
-    spare_parts: Optional[list[SparePartRow]] = None
-    maintenance: Optional[list[MaintenanceRow]] = None
-    troubleshooting: Optional[list[TroubleshootingRow]] = None
+    spare_parts: Optional[list[Any]] = None
+    maintenance: Optional[list[Any]] = None
+    troubleshooting: Optional[list[Any]] = None
+
+    @field_validator("document_status", mode="before")
+    @classmethod
+    def _parse_doc_status(cls, v: Any) -> str:
+        s = str(v or "").strip()
+        if s in {"Draft", "Pending Review", "In Review", "Pending Sign-Off", "Approved", "Rejected", "Needs Revision"}:
+            return s
+        if s.lower() in {"approved", "signed off", "signed-off"}:
+            return "Approved"
+        if s.lower() in {"rejected", "reject"}:
+            return "Rejected"
+        if s.lower() in {"in review", "in-review", "reviewing"}:
+            return "In Review"
+        if s.lower() in {"pending sign-off", "pending sign off", "pending-sign-off"}:
+            return "Pending Sign-Off"
+        if s.lower() in {"needs revision", "revision"}:
+            return "Needs Revision"
+        return "Pending Review"
 
 
 class ShareLinkResponse(BaseModel):

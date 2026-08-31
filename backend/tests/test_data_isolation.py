@@ -97,6 +97,13 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
         row4 = {"approved_by": "lead.approver@corp.com", "engine": "gemini"}
         self.assertTrue(_row_matches_user(row4, user_email="lead.approver@corp.com"))
 
+        # 5. Exact email only — overlapping prefixes must not match
+        row5 = {"user_email": "user@corp.com.au", "engine": "gemini"}
+        self.assertFalse(_row_matches_user(row5, user_email="user@corp.com"))
+        row6 = {"user_email": "alice.engineer@corp.com"}
+        self.assertFalse(_row_matches_user(row6, user_email="alice@corp.com"))
+        self.assertTrue(_row_matches_user(row6, user_email="Alice.Engineer@corp.com"))
+
     def test_list_done_extracts_sql_parameterization(self):
         """Verify list_done_extracts constructs parameterized WHERE clauses."""
         mock_conn = MagicMock()
@@ -134,8 +141,7 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             {"run_id": "run-alice-01", "filename": "alice_pump.pdf", "user_id": self.editor_user.id, "user_email": self.editor_user.email, "document_status": "Approved"},
         ]
 
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts", return_value=mock_rows) as mock_list:
+        with patch("app.main.list_done_extracts", return_value=mock_rows) as mock_list:
             
             resp = self.client.get("/api/fabric/extracts", headers=headers)
             self.assertEqual(resp.status_code, 200)
@@ -154,8 +160,7 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
         """GET /api/fabric/extracts?all_users=true must ignore all_users for non-admins."""
         headers = {"Authorization": f"Bearer {self.editor_token}"}
         
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts", return_value=[]) as mock_list:
+        with patch("app.main.list_done_extracts", return_value=[]) as mock_list:
             
             resp = self.client.get("/api/fabric/extracts?all_users=true", headers=headers)
             self.assertEqual(resp.status_code, 200)
@@ -172,8 +177,7 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
         headers = {"Authorization": f"Bearer {self.admin_token}"}
 
         # 1. Admin without all_users (default My Extracts)
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts", return_value=[]) as mock_list:
+        with patch("app.main.list_done_extracts", return_value=[]) as mock_list:
             
             resp = self.client.get("/api/fabric/extracts", headers=headers)
             self.assertEqual(resp.status_code, 200)
@@ -184,8 +188,7 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             )
 
         # 2. Admin with all_users=true (global view)
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts", return_value=[]) as mock_list_all:
+        with patch("app.main.list_done_extracts", return_value=[]) as mock_list_all:
             
             resp = self.client.get("/api/fabric/extracts?all_users=true", headers=headers)
             self.assertEqual(resp.status_code, 200)
@@ -208,20 +211,20 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             "overall_score": 95.0,
         }
 
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.get_done_run", return_value=other_user_meta):
+        with patch("app.main.get_done_run", return_value=other_user_meta):
             
             resp = self.client.get("/api/fabric/extracts/run-foreign-999", headers=editor_headers)
             self.assertEqual(resp.status_code, 403)
             self.assertIn("Access Denied", resp.json()["detail"])
 
     def test_fabric_extract_get_authorized_for_owner_admin_and_approver(self):
-        """Owner, Admin, and Approver can access the extract run."""
+        """Owner, Admin, and the strictly assigned approver can access the extract run."""
         extract_meta = {
             "run_id": "run-alice-123",
             "filename": "generator_manual.pdf",
             "user_id": self.editor_user.id,
             "user_email": self.editor_user.email,
+            "assigned_approver": self.approver_user.email,
             "overall_score": 88.0,
         }
         mock_extract_resp = ExtractResponse(
@@ -236,8 +239,20 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             troubleshooting=[],
         )
 
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.get_done_run", return_value=extract_meta), \
+        other_approver = create_user(
+            email="eve.approver@corp.com",
+            display_name="Eve Approver",
+            role="approver",
+            password="Password123!",
+        )
+        other_token = create_access_token(
+            user_id=other_approver.id,
+            email=other_approver.email,
+            role=other_approver.role,
+            secret=self.secret,
+        )
+
+        with patch("app.main.get_done_run", return_value=extract_meta), \
              patch("app.main.load_extract_from_fabric", return_value=mock_extract_resp):
             
             # 1. Owner (Alice) can access
@@ -254,12 +269,19 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             )
             self.assertEqual(resp2.status_code, 200)
 
-            # 3. Approver can access
+            # 3. Assigned approver can access
             resp3 = self.client.get(
                 "/api/fabric/extracts/run-alice-123",
                 headers={"Authorization": f"Bearer {self.approver_token}"},
             )
             self.assertEqual(resp3.status_code, 200)
+
+            # 4. Unassigned approver is forbidden
+            resp4 = self.client.get(
+                "/api/fabric/extracts/run-alice-123",
+                headers={"Authorization": f"Bearer {other_token}"},
+            )
+            self.assertEqual(resp4.status_code, 403)
 
     def test_pending_approvals_scoping_behavior(self):
         """Pending approvals is scoped strictly to assigned approver mapping."""
@@ -271,8 +293,8 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             {"run_id": "r2", "document_status": "Pending Review", "user_id": "other-id", "user_email": "other@corp.com", "assigned_approver": "different.approver@corp.com"},
         ]
 
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts", return_value=mock_rows) as mock_list:
+        with patch("app.main.list_done_extracts", return_value=mock_rows) as mock_list, \
+             patch("app.auth.store.list_users", return_value=[self.editor_user, self.approver_user, self.admin_user]):
             
             # 1. Standard editor: gets only their own pending submission
             resp = self.client.get(
@@ -305,10 +327,58 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             data3 = resp3.json()
             self.assertEqual(data3["count"], 2)
 
+    def test_pending_approvals_reads_assigned_approver_from_envelope(self):
+        """Bell backend hydrates assigned_approver from the JSON envelope in `error`."""
+        store.update_user(self.editor_user.id, assigned_approver=self.approver_user.email)
+        envelope = json.dumps({
+            "document_status": "Pending Review",
+            "submitted_by": self.editor_user.email,
+            "assigned_approver": self.approver_user.email,
+            "user_email": self.editor_user.email,
+            "user_id": self.editor_user.id,
+        })
+        mock_rows = [
+            {"run_id": "env-1", "filename": "Pump.pdf", "error": envelope},
+            {
+                "run_id": "env-other",
+                "filename": "Other.pdf",
+                "error": json.dumps({
+                    "document_status": "Pending Review",
+                    "submitted_by": "other@corp.com",
+                    "assigned_approver": "someone.else@corp.com",
+                }),
+            },
+        ]
+        with patch("app.main.list_done_extracts", return_value=mock_rows), \
+             patch("app.auth.store.list_users", return_value=[self.editor_user, self.approver_user, self.admin_user]):
+            resp = self.client.get(
+                "/api/fabric/pending-approvals",
+                headers={"Authorization": f"Bearer {self.approver_token}"},
+            )
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertEqual(data["count"], 1)
+            self.assertEqual(data["items"][0]["run_id"], "env-1")
+            self.assertEqual(data["items"][0]["assigned_approver"], self.approver_user.email)
+
+    def test_apply_log_envelope_hydrates_approver_fields(self):
+        from app.integrations.fabric_cache import _apply_log_envelope
+        env = json.dumps({
+            "document_status": "Pending Sign-Off",
+            "submitted_by": "editor@corp.com",
+            "assigned_approver": "dan.approver@corp.com",
+            "user_email": "editor@corp.com",
+            "user_id": "uid-1",
+        })
+        row = _apply_log_envelope({"run_id": "r1", "Error": env})
+        self.assertEqual(row["assigned_approver"], "dan.approver@corp.com")
+        self.assertEqual(row["submitted_by"], "editor@corp.com")
+        self.assertEqual(row["document_status"], "Pending Sign-Off")
+        self.assertEqual(row["user_email"], "editor@corp.com")
+
     def test_unauthenticated_access_returns_empty_and_no_leak(self):
         """Unauthenticated requests must never return global extracts."""
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts") as mock_list:
+        with patch("app.main.list_done_extracts") as mock_list:
             resp = self.client.get("/api/fabric/extracts")
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
@@ -328,8 +398,7 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
         mock_rows = [
             {"run_id": "r-sso-1", "filename": "sso_manual.pdf", "user_id": "sso-user-uuid-999", "user_email": "sso.engineer@corp.com", "document_status": "Approved"}
         ]
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.main.list_done_extracts", return_value=mock_rows) as mock_list:
+        with patch("app.main.list_done_extracts", return_value=mock_rows) as mock_list:
             resp = self.client.get(
                 "/api/fabric/extracts",
                 headers={"Authorization": f"Bearer {external_token}"},
@@ -372,6 +441,7 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
 
         with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
              patch("app.integrations.fabric_cache.find_done_run", return_value=mock_cached_run), \
+             patch("app.integrations.fabric_cache.find_user_run_by_content_hash", return_value=None), \
              patch("app.integrations.fabric_cache.load_extract_from_fabric", return_value=mock_loaded_response), \
              patch("app.integrations.fabric_cache.save_extract_to_fabric", return_value="run-new-user-session-888") as mock_save:
 
@@ -397,6 +467,271 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
 
             # 2. Verify returned result meta has the new session run_id
             self.assertEqual(res.meta.run_id, "run-new-user-session-888")
+            self.assertEqual(res.meta.document_status, "Pending Review")
+            self.assertFalse(res.meta.already_approved)
+
+    def test_cache_hit_shows_global_approved_status(self):
+        """Uploading a previously signed-off document shows Approved for any new uploader."""
+        import asyncio
+        from app.integrations.fabric_cache import extract_with_fabric_cache
+        from app.models import BaselineExtraction, SparePartRow
+
+        orig_raw = {
+            "spare_parts": [{"id": 1, "part_name": "Piston", "part_number_code": "PA-1"}],
+            "maintenance": [],
+            "troubleshooting": [],
+            "doc_metadata": {"title": "Pump Manual"},
+            "extracted_at": "2026-08-01T00:00:00Z",
+        }
+        mock_loaded_response = ExtractResponse(
+            meta=ExtractMeta(
+                filename="signed_manual.pdf",
+                overall_score=91.0,
+                engine="fabric-cache",
+                parse_strategy="cache",
+                run_id="run-approved-orig",
+                document_status="Approved",
+                approved_by="orig.approver@corp.com",
+                approved_at="2026-08-20T12:00:00Z",
+            ),
+            spare_parts=[SparePartRow(id=1, part_name="Piston EDITED", part_number_code="PA-1", status="Approved")],
+            maintenance=[],
+            troubleshooting=[],
+            baseline=BaselineExtraction(
+                spare_parts=[SparePartRow(id=1, part_name="Piston", part_number_code="PA-1")],
+                maintenance=[],
+                troubleshooting=[],
+            ),
+            raw_payload=orig_raw,
+        )
+        approved_global = {
+            "run_id": "run-approved-orig",
+            "overall_score": 91.0,
+            "document_status": "Approved",
+            "content_hash": "abc",
+        }
+
+        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
+             patch("app.integrations.fabric_cache.find_done_run", return_value={"run_id": "run-approved-orig", "overall_score": 91.0}), \
+             patch("app.integrations.fabric_cache.find_approved_run_by_content_hash", return_value=approved_global), \
+             patch("app.integrations.fabric_cache.find_user_run_by_content_hash", return_value=None), \
+             patch("app.integrations.fabric_cache.load_extract_from_fabric", return_value=mock_loaded_response), \
+             patch("app.integrations.fabric_cache.save_extract_to_fabric", return_value="run-new-approved") as mock_save, \
+             patch("app.integrations.fabric_cache.supersede_duplicate_runs", return_value=0), \
+             patch("app.notifications.create_notification") as mock_notif:
+
+            res = asyncio.run(
+                extract_with_fabric_cache(
+                    file_bytes=b"%PDF-1.4 signed",
+                    filename="signed_manual.pdf",
+                    options=ExtractOptions(engine="gemini", parse_strategy="ocr"),
+                    extract_fn=MagicMock(),
+                    user_id=self.editor_user.id,
+                    user_email=self.editor_user.email,
+                    user_role=self.editor_user.role,
+                )
+            )
+
+            saved_result = mock_save.call_args[1]["result"]
+            self.assertEqual(saved_result.meta.document_status, "Approved")
+            self.assertEqual(saved_result.meta.approved_by, "orig.approver@corp.com")
+            self.assertTrue(saved_result.meta.already_approved)
+            self.assertEqual(saved_result.meta.prior_approved_by, "orig.approver@corp.com")
+            self.assertEqual(saved_result.spare_parts[0].status, "Approved")
+            self.assertEqual(res.meta.document_status, "Approved")
+            self.assertTrue(res.meta.already_approved)
+            self.assertTrue(mock_notif.called)
+
+    def test_share_requires_document_ownership(self):
+        extract_meta = {
+            "run_id": "run-alice-share",
+            "filename": "pump.pdf",
+            "user_id": self.editor_user.id,
+            "user_email": self.editor_user.email,
+        }
+        with patch("app.main.get_done_run", return_value=extract_meta):
+            denied = self.client.post(
+                "/api/fabric/extracts/run-alice-share/share",
+                headers={"Authorization": f"Bearer {self.approver_token}"},
+            )
+            self.assertEqual(denied.status_code, 403)
+
+            owned = self.client.post(
+                "/api/fabric/extracts/run-alice-share/share",
+                headers={"Authorization": f"Bearer {self.editor_token}"},
+            )
+            self.assertEqual(owned.status_code, 200)
+            self.assertIn("share_token", owned.json())
+
+    def test_review_sync_forbids_unassigned_approver(self):
+        extract_meta = {
+            "run_id": "run-alice-rev",
+            "filename": "pump.pdf",
+            "user_id": self.editor_user.id,
+            "user_email": self.editor_user.email,
+            "assigned_approver": "someone.else@corp.com",
+            "submitted_by": self.editor_user.email,
+        }
+        with patch("app.main.get_done_run", return_value=extract_meta), \
+             patch("app.main.update_fabric_review_state", return_value=True) as mock_upd:
+            resp = self.client.post(
+                "/api/fabric/extracts/run-alice-rev/review-sync",
+                json={"document_status": "Approved", "approved_by": self.approver_user.email},
+                headers={"Authorization": f"Bearer {self.approver_token}"},
+            )
+            self.assertEqual(resp.status_code, 403)
+            mock_upd.assert_not_called()
+
+    def test_notifications_fanout_and_list_scoped_to_recipient(self):
+        from pathlib import Path
+        import tempfile
+        from app import notifications as nmod
+
+        extract_meta = {
+            "run_id": "run-alice-notif",
+            "filename": "pump.pdf",
+            "doc_title": "Mud Pump Manual",
+            "user_id": self.editor_user.id,
+            "user_email": self.editor_user.email,
+            "submitted_by": self.editor_user.email,
+            "assigned_approver": self.approver_user.email,
+        }
+        with tempfile.TemporaryDirectory() as td:
+            notif_path = Path(td) / "notifications.json"
+            with patch.object(nmod, "NOTIF_FILE", notif_path), \
+                 patch("app.main.get_done_run", return_value=extract_meta), \
+                 patch("app.main.update_fabric_review_state", return_value=True), \
+                 patch("app.main.update_extract_audit_review_state", return_value=True):
+                submit = self.client.post(
+                    "/api/fabric/extracts/run-alice-notif/review-sync",
+                    json={"document_status": "Pending Sign-Off"},
+                    headers={"Authorization": f"Bearer {self.editor_token}"},
+                )
+                self.assertEqual(submit.status_code, 200)
+
+                approver_list = self.client.get(
+                    "/api/notifications",
+                    headers={"Authorization": f"Bearer {self.approver_token}"},
+                )
+                self.assertEqual(approver_list.status_code, 200)
+                items = approver_list.json()["items"]
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["event_type"], "submitted")
+                self.assertEqual(items[0]["title"], "Mud Pump Manual")
+                self.assertIn("fabric_run_id=run-alice-notif", items[0]["url"])
+
+                editor_list = self.client.get(
+                    "/api/notifications",
+                    headers={"Authorization": f"Bearer {self.editor_token}"},
+                )
+                self.assertEqual(editor_list.json()["count"], 0)
+
+                signoff = self.client.post(
+                    "/api/fabric/extracts/run-alice-notif/review-sync",
+                    json={"document_status": "Approved", "approved_by": self.approver_user.email},
+                    headers={"Authorization": f"Bearer {self.approver_token}"},
+                )
+                self.assertEqual(signoff.status_code, 200)
+
+                editor_after = self.client.get(
+                    "/api/notifications",
+                    headers={"Authorization": f"Bearer {self.editor_token}"},
+                )
+                ed_items = editor_after.json()["items"]
+                self.assertEqual(len(ed_items), 1)
+                self.assertEqual(ed_items[0]["event_type"], "signed_off")
+                self.assertIn("fabric_run_id=run-alice-notif", ed_items[0]["url"])
+
+    def test_cache_hit_reuses_existing_user_run_instead_of_duplicate(self):
+        """Re-uploading the same file must reopen the user's existing run, not insert a new row."""
+        import asyncio
+        from app.integrations.fabric_cache import extract_with_fabric_cache
+
+        existing = {
+            "run_id": "run-user-existing",
+            "content_hash": "abc123hash",
+            "filename": "1.pdf",
+            "user_id": self.editor_user.id,
+            "user_email": self.editor_user.email,
+            "document_status": "Approved",
+            "overall_score": 94.4,
+        }
+        mock_result = ExtractResponse(
+            meta=ExtractMeta(
+                filename="1.pdf",
+                overall_score=94.4,
+                engine="fabric-cache",
+                parse_strategy="cache",
+                run_id="run-user-existing",
+                document_status="Approved",
+            ),
+            spare_parts=[],
+            maintenance=[],
+            troubleshooting=[],
+        )
+
+        with patch("app.integrations.fabric_cache.find_done_run", return_value={"run_id": "run-global", "overall_score": 94.4}), \
+             patch("app.integrations.fabric_cache.find_user_run_by_content_hash", return_value=existing), \
+             patch("app.integrations.fabric_cache.load_extract_from_fabric", return_value=mock_result), \
+             patch("app.integrations.fabric_cache.save_extract_to_fabric") as mock_save:
+            res = asyncio.run(
+                extract_with_fabric_cache(
+                    file_bytes=b"%PDF-same-file",
+                    filename="1.pdf",
+                    options=ExtractOptions(engine="gemini", parse_strategy="ocr"),
+                    extract_fn=MagicMock(),
+                    user_id=self.editor_user.id,
+                    user_email=self.editor_user.email,
+                    user_role=self.editor_user.role,
+                )
+            )
+            mock_save.assert_not_called()
+            self.assertEqual(res.meta.run_id, "run-user-existing")
+
+    def test_review_sync_row_level_does_not_flood_editor_notifications(self):
+        """Intermediate In Review / Pending Review syncs must not notify the editor."""
+        from app.main import _fanout_review_notifications
+        from app import notifications as nmod
+        from pathlib import Path
+        import tempfile
+
+        meta = {
+            "run_id": "run-doc",
+            "filename": "1.pdf",
+            "user_email": self.editor_user.email,
+            "submitted_by": self.editor_user.email,
+            "assigned_approver": self.approver_user.email,
+        }
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(nmod, "NOTIF_FILE", Path(td) / "notifications.json"), \
+                 patch("app.main.upsert_document_notification") as mock_upsert:
+                _fanout_review_notifications(
+                    meta,
+                    "In Review",
+                    self.approver_user.email,
+                    "run-doc",
+                    previous_status="Pending Review",
+                )
+                _fanout_review_notifications(
+                    meta,
+                    "Pending Review",
+                    self.approver_user.email,
+                    "run-doc",
+                    previous_status="In Review",
+                )
+                mock_upsert.assert_not_called()
+
+                _fanout_review_notifications(
+                    meta,
+                    "Approved",
+                    self.approver_user.email,
+                    "run-doc",
+                    previous_status="Pending Review",
+                    maintenance=[{"status": "Approved"}] * 14,
+                )
+                self.assertEqual(mock_upsert.call_count, 1)
+                body = mock_upsert.call_args[1].get("body") or ""
+                self.assertIn("14 approved", body)
 
 
 if __name__ == "__main__":

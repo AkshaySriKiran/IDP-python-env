@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -20,6 +21,101 @@ from ..models import (
 from . import fabric_sql, graph_sharepoint
 
 logger = logging.getLogger(__name__)
+
+# Warehouse `error` column is historically VARCHAR(2000). Full dual payloads exceed that
+# and cause the entire Fabric save (including audit) to abort. Keep a slim envelope in SQL;
+# full payload stays in the local extract_store and relational row tables.
+_LOG_ERROR_MAX_CHARS = 1800
+
+_LOG_SELECT_CANDIDATES = [
+    "run_id", "filename", "content_hash", "drive_item_id", "etag",
+    "overall_score", "maintenance_count", "spare_parts_count", "troubleshooting_count",
+    "engine", "parse_strategy", "extracted_at", "error", "status",
+    "document_status", "user_id", "user_email", "approved_by", "approved_at",
+]
+
+
+def _log_select_sql(conn: Any, *, top: int = 1) -> str:
+    known = fabric_sql._get_table_columns(conn, "Tbl_PM_Extraction_logs")
+    cols = [c for c in _LOG_SELECT_CANDIDATES if not known or c.lower() in known]
+    if not cols:
+        cols = ["run_id", "filename", "content_hash", "error", "extracted_at"]
+    return f"SELECT TOP {max(1, int(top))} {', '.join(cols)} FROM Tbl_PM_Extraction_logs"
+
+
+def _envelope_json_for_log_column(envelope: dict[str, Any], *, max_chars: int = _LOG_ERROR_MAX_CHARS) -> str:
+    """Serialize envelope to fit VARCHAR(2000) `error` column when present."""
+    full = json.dumps(envelope, ensure_ascii=False)
+    if len(full) <= max_chars:
+        return full
+    slim = {
+        "_v": envelope.get("_v", 2),
+        "_slim": True,
+        "run_id": envelope.get("run_id"),
+        "content_hash": envelope.get("content_hash"),
+        "drive_item_id": envelope.get("drive_item_id"),
+        "etag": envelope.get("etag"),
+        "filename": envelope.get("filename"),
+        "doc_metadata": envelope.get("doc_metadata") or {},
+        "document_status": envelope.get("document_status"),
+        "approved_by": envelope.get("approved_by"),
+        "approved_at": envelope.get("approved_at"),
+        "submitted_by": envelope.get("submitted_by"),
+        "assigned_approver": envelope.get("assigned_approver"),
+        "rejection_notes": envelope.get("rejection_notes"),
+        "user_id": envelope.get("user_id"),
+        "user_email": envelope.get("user_email"),
+        "user_role": envelope.get("user_role"),
+        "doc_title": envelope.get("doc_title"),
+        "oem_manufacturer": envelope.get("oem_manufacturer"),
+        "equipment_model": envelope.get("equipment_model"),
+        "equipment_type": envelope.get("equipment_type"),
+        "document_version": envelope.get("document_version"),
+        "publication_date": envelope.get("publication_date"),
+        "duration_ms": envelope.get("duration_ms"),
+        "pages_total": envelope.get("pages_total"),
+        "pages_processed": envelope.get("pages_processed"),
+        # Row bodies live in Tbl_PM_* tables; omit bulky arrays from the log column.
+        "payload_in_row_tables": True,
+    }
+    slim_json = json.dumps(slim, ensure_ascii=False)
+    if len(slim_json) <= max_chars:
+        return slim_json
+    return slim_json[: max_chars - 3] + "..."
+
+
+def _emit_extract_audit(
+    conn: Any,
+    *,
+    event_type: str,
+    run_id: str,
+    content_hash: Optional[str] = None,
+    filename: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_role: Optional[str] = None,
+    from_status: Optional[str] = None,
+    to_status: Optional[str] = None,
+    details: Optional[dict[str, Any]] = None,
+) -> None:
+    fabric_sql.insert_audit_event(
+        conn,
+        {
+            "event_id": uuid.uuid4().hex,
+            "event_type": event_type,
+            "run_id": run_id,
+            "content_hash": content_hash,
+            "filename": filename,
+            "user_id": user_id,
+            "user_email": user_email,
+            "user_role": user_role,
+            "from_status": from_status,
+            "to_status": to_status,
+            "details_json": json.dumps(details or {}, ensure_ascii=False),
+            "created_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        },
+    )
+
 
 SPARE_COLS = [
     "run_id", "equipment_title", "subsystem_location", "item_no", "part_name",
@@ -54,6 +150,13 @@ DATA_DIR = Path(os.getenv("OMNIPARSE_DATA_DIR", Path(__file__).resolve().parents
 CACHE_DIR = DATA_DIR / "extract_store"
 _cache_lock = threading.RLock()
 _MEM_CACHE: dict[str, dict[str, Any]] = {}
+_LIST_EXTRACTS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_LIST_EXTRACTS_TTL = 4.0
+
+
+def invalidate_extracts_list_cache() -> None:
+    with _cache_lock:
+        _LIST_EXTRACTS_CACHE.clear()
 
 
 def _store_in_cache(run_id: str, record: dict[str, Any]) -> None:
@@ -101,15 +204,18 @@ def _find_in_cache(
                     except Exception:
                         pass
 
+    norm_hash = (content_hash or "").strip().lower()
     norm_fn = (filename or "").strip().lower()
+    norm_item = (drive_item_id or "").strip()
+
     for rec in reversed(candidates):
-        r_hash = str(rec.get("content_hash") or "").strip()
+        r_hash = str(rec.get("content_hash") or "").strip().lower()
         r_fn = str(rec.get("filename") or "").strip().lower()
         r_item = str(rec.get("drive_item_id") or "").strip()
 
-        if content_hash and r_hash and r_hash == content_hash:
+        if norm_hash and r_hash and r_hash == norm_hash:
             return rec
-        if drive_item_id and drive_item_id != "LOCAL_UPLOAD" and r_item and r_item == drive_item_id:
+        if norm_item and norm_item != "LOCAL_UPLOAD" and r_item and r_item == norm_item:
             return rec
         if norm_fn and r_fn and r_fn == norm_fn:
             return rec
@@ -137,83 +243,202 @@ def _quality_from_row(d: dict[str, Any]) -> Optional[RowQuality]:
         return None
 
 
+def _row_content_hash(row: dict[str, Any]) -> str:
+    rh = str(row.get("content_hash") or "").strip().lower()
+    if rh:
+        return rh
+    env_raw = str(row.get("error") or "")
+    if env_raw.startswith("{"):
+        try:
+            return str(json.loads(env_raw).get("content_hash") or "").strip().lower()
+        except Exception:
+            pass
+    return ""
+
+
+def find_user_run_by_content_hash(
+    content_hash: str,
+    *,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return the current user's most recent extract run for a file hash, if any."""
+    norm_hash = (content_hash or "").strip().lower()
+    if not norm_hash or (not user_id and not user_email):
+        return None
+    try:
+        rows = list_done_extracts(limit=200, user_id=user_id, user_email=user_email)
+    except Exception:
+        return None
+    for row in rows:
+        if _row_content_hash(row) == norm_hash:
+            return row
+    return None
+
+
+def find_approved_run_by_content_hash(content_hash: str) -> Optional[dict[str, Any]]:
+    """Return any globally approved extract run for a file hash (cross-user canonical)."""
+    norm_hash = (content_hash or "").strip().lower()
+    if not norm_hash:
+        return None
+
+    if fabric_sql.fabric_configured():
+        try:
+            conn = fabric_sql.connect()
+            try:
+                cur = conn.cursor()
+                # Adaptive SELECT — warehouse may not have document_status as a real column.
+                sql = (
+                    _log_select_sql(conn, top=25)
+                    + """
+                    WHERE (status IS NULL OR LOWER(status) NOT IN ('error', 'failed', 'cancelled'))
+                      AND LOWER(RTRIM(LTRIM(content_hash))) = LOWER(?)
+                    ORDER BY extracted_at DESC
+                    """
+                )
+                cur.execute(sql, (norm_hash,))
+                cols = [c[0] for c in cur.description]
+                for raw in cur.fetchall() or []:
+                    row = _apply_log_envelope(dict(zip(cols, raw)))
+                    if _clean_status(row.get("document_status")) == "Approved":
+                        return row
+            finally:
+                conn.close()
+        except Exception as err:
+            logger.warning("Fabric find_approved_run_by_content_hash error: %s", err)
+
+    try:
+        for row in list_done_extracts(limit=500):
+            if _row_content_hash(row) != norm_hash:
+                continue
+            if _clean_status(row.get("document_status")) == "Approved":
+                return row
+    except Exception:
+        pass
+
+    with _cache_lock:
+        for rec in reversed(list(_MEM_CACHE.values())):
+            if _row_content_hash(rec) != norm_hash:
+                continue
+            if _clean_status(rec.get("document_status")) == "Approved":
+                return rec
+
+    return None
+
+
+def supersede_duplicate_runs(
+    canonical_run_id: str,
+    *,
+    content_hash: Optional[str],
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+) -> int:
+    """Archive duplicate pending/in-review rows for the same user+file after approval."""
+    norm_hash = (content_hash or "").strip().lower()
+    canon = (canonical_run_id or "").strip()
+    if not norm_hash or not canon:
+        return 0
+    n = 0
+    try:
+        rows = list_done_extracts(limit=200, user_id=user_id, user_email=user_email)
+    except Exception:
+        return 0
+    for row in rows:
+        rid = str(row.get("run_id") or "").strip()
+        if not rid or rid == canon:
+            continue
+        rh = str(row.get("content_hash") or "").strip().lower()
+        if rh != norm_hash:
+            continue
+        status = _clean_status(row.get("document_status"))
+        if status in {"Approved", "Superseded", "Rejected"}:
+            continue
+        try:
+            update_fabric_review_state(
+                rid,
+                document_status="Superseded",
+                rejection_notes=f"Superseded by approved run {canon}",
+                user_id=user_id,
+                user_email=user_email,
+            )
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
 def find_done_run(
     *,
     content_hash: str,
     drive_item_id: Optional[str] = None,
     filename: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
+    clean_hash = (content_hash or "").strip().lower()
+    clean_fn = (filename or "").strip()
+    clean_drive_id = (drive_item_id or "").strip()
+
     # 1. Primary: Search Microsoft Fabric SQL Lakehouse
     if fabric_sql.fabric_configured():
         try:
             conn = fabric_sql.connect()
             try:
                 cur = conn.cursor()
-                
-                # 1a. Match by content_hash
-                if content_hash:
+                select_sql = _log_select_sql(conn, top=1)
+
+                # 1a. Match by content_hash (exact, lowercase/trimmed)
+                if clean_hash:
                     cur.execute(
-                        """
-                        SELECT TOP 1 run_id, filename, overall_score, maintenance_count,
-                               spare_parts_count, troubleshooting_count, engine, parse_strategy,
-                               document_status, user_id, user_email, error
-                        FROM Tbl_PM_Extraction_logs
+                        select_sql
+                        + """
                         WHERE (status IS NULL OR LOWER(status) NOT IN ('error', 'failed', 'cancelled'))
-                          AND (content_hash = ? OR error LIKE ?)
+                          AND LOWER(RTRIM(LTRIM(content_hash))) = LOWER(?)
                         ORDER BY extracted_at DESC
                         """,
-                        (content_hash, f'%"{content_hash}"%'),
+                        (clean_hash,),
                     )
                     row = cur.fetchone()
                     if row:
                         cols = [c[0] for c in cur.description]
-                        return dict(zip(cols, row))
+                        return _apply_log_envelope(dict(zip(cols, row)))
 
                 # 1b. Match by drive_item_id
-                if drive_item_id and drive_item_id != "LOCAL_UPLOAD":
+                if clean_drive_id and clean_drive_id != "LOCAL_UPLOAD":
                     cur.execute(
-                        """
-                        SELECT TOP 1 run_id, filename, overall_score, maintenance_count,
-                               spare_parts_count, troubleshooting_count, engine, parse_strategy,
-                               document_status, user_id, user_email, error
-                        FROM Tbl_PM_Extraction_logs
+                        select_sql
+                        + """
                         WHERE (status IS NULL OR LOWER(status) NOT IN ('error', 'failed', 'cancelled'))
                           AND drive_item_id = ?
                         ORDER BY extracted_at DESC
                         """,
-                        (drive_item_id,),
+                        (clean_drive_id,),
                     )
                     row = cur.fetchone()
                     if row:
                         cols = [c[0] for c in cur.description]
-                        return dict(zip(cols, row))
+                        return _apply_log_envelope(dict(zip(cols, row)))
 
                 # 1c. Match by filename
-                if filename:
-                    clean_fn = filename.strip()
+                if clean_fn:
                     cur.execute(
-                        """
-                        SELECT TOP 1 run_id, filename, overall_score, maintenance_count,
-                               spare_parts_count, troubleshooting_count, engine, parse_strategy,
-                               document_status, user_id, user_email, error
-                        FROM Tbl_PM_Extraction_logs
+                        select_sql
+                        + """
                         WHERE (status IS NULL OR LOWER(status) NOT IN ('error', 'failed', 'cancelled'))
-                          AND (LOWER(filename) = LOWER(?) OR error LIKE ?)
+                          AND LOWER(RTRIM(LTRIM(filename))) = LOWER(?)
                         ORDER BY extracted_at DESC
                         """,
-                        (clean_fn, f'%"{clean_fn}"%'),
+                        (clean_fn,),
                     )
                     row = cur.fetchone()
                     if row:
                         cols = [c[0] for c in cur.description]
-                        return dict(zip(cols, row))
+                        return _apply_log_envelope(dict(zip(cols, row)))
             finally:
                 conn.close()
         except Exception as err:
             logger.warning("Fabric find_done_run error: %s", err)
 
     # 2. Resilient fallback: Search unified persistent store
-    cached = _find_in_cache(content_hash=content_hash, filename=filename, drive_item_id=drive_item_id)
+    cached = _find_in_cache(content_hash=clean_hash, filename=clean_fn, drive_item_id=clean_drive_id)
     if cached:
         return cached
 
@@ -224,57 +449,196 @@ def find_done_run_by_hash(content_hash: str) -> Optional[dict[str, Any]]:
     return find_done_run(content_hash=content_hash)
 
 
+def _norm_email(val: Any) -> str:
+    return str(val or "").strip().lower()
+
+
+def _emails_equal(a: Any, b: Any) -> bool:
+    left, right = _norm_email(a), _norm_email(b)
+    return bool(left and right and left == right)
+
+
+def resolve_assigned_approver(row: dict[str, Any]) -> str:
+    """Assigned approver on the log row, or the document owner's user-store mapping."""
+    direct = _norm_email(row.get("assigned_approver"))
+    if direct:
+        return direct
+    owner = _norm_email(row.get("submitted_by") or row.get("user_email"))
+    if not owner:
+        return ""
+    try:
+        from ..auth import store as auth_store
+        rec = auth_store.find_by_email(owner)
+        if rec:
+            return _norm_email(rec.get("assigned_approver"))
+    except Exception:
+        pass
+    return ""
+
+
+def user_owns_extract(row: dict[str, Any], user: Any) -> bool:
+    if not user or not row:
+        return False
+    uid = str(getattr(user, "id", None) or "").strip()
+    email = _norm_email(getattr(user, "email", None))
+    r_uid = str(row.get("user_id") or "").strip()
+    if uid and r_uid and uid == r_uid:
+        return True
+    for key in ("user_email", "submitted_by"):
+        if email and _emails_equal(row.get(key), email):
+            return True
+    return False
+
+
+def user_can_view_extract(row: dict[str, Any], user: Any) -> bool:
+    """Owner, assigned approver, or admin. Unassigned approvers cannot view other tenants."""
+    if not row:
+        return False
+    if not user:
+        return True
+    role = str(getattr(user, "role", None) or "").strip().lower()
+    if role == "admin":
+        return True
+    if user_owns_extract(row, user):
+        return True
+    if role == "approver":
+        assigned = resolve_assigned_approver(row)
+        return bool(assigned and _emails_equal(assigned, getattr(user, "email", None)))
+    return False
+
+
+def user_can_sign_off_extract(row: dict[str, Any], user: Any) -> bool:
+    if not user or not row:
+        return False
+    role = str(getattr(user, "role", None) or "").strip().lower()
+    if role == "admin":
+        return True
+    if role != "approver":
+        return False
+    assigned = resolve_assigned_approver(row)
+    return bool(assigned and _emails_equal(assigned, getattr(user, "email", None)))
+
+
 def _row_matches_user(
     row: dict[str, Any],
     user_id: Optional[str] = None,
     user_email: Optional[str] = None,
 ) -> bool:
-    """Verifies whether an extraction log row belongs to the specified user."""
     uid = str(user_id or "").strip()
-    uemail = str(user_email or "").strip().lower()
+    uemail = _norm_email(user_email)
     if not uid and not uemail:
         return True
 
     r_uid = str(row.get("user_id") or "").strip()
-    r_email = str(row.get("user_email") or "").strip().lower()
-    r_appr = str(row.get("approved_by") or "").strip().lower()
-    r_sub = str(row.get("submitted_by") or "").strip().lower()
+    r_email = _norm_email(row.get("user_email"))
+    r_appr = _norm_email(row.get("approved_by"))
+    r_assign = _norm_email(row.get("assigned_approver"))
+    r_sub = _norm_email(row.get("submitted_by"))
+    r_mod = _norm_email(row.get("last_modified_by"))
     r_engine = str(row.get("engine") or "").lower()
     r_err = str(row.get("error") or "")
 
-    # 1. Match direct user_id
     if uid and r_uid and r_uid == uid:
         return True
 
-    # 2. Match direct user_email or approver/submitter
     if uemail:
-        if r_email and (r_email == uemail or uemail in r_email):
+        if r_email and r_email == uemail:
             return True
-        if r_appr and (r_appr == uemail or uemail in r_appr):
+        if r_sub and r_sub == uemail:
             return True
-        if r_sub and (r_sub == uemail or uemail in r_sub):
+        if r_appr and r_appr == uemail:
             return True
-        if f"[user:{uemail}]" in r_engine or f"user:{uemail}" in r_engine:
+        if r_assign and r_assign == uemail:
+            return True
+        if r_mod and r_mod == uemail:
+            return True
+        if f"[user:{uemail}]" in r_engine:
             return True
 
-    # 3. Match within JSON envelope inside error column
     if r_err.startswith("{") and r_err.endswith("}"):
         try:
             env = json.loads(r_err)
             env_uid = str(env.get("user_id") or "").strip()
-            env_email = str(env.get("user_email") or "").strip().lower()
-            env_mod = str(env.get("last_modified_by") or env.get("submitted_by") or "").strip().lower()
             if uid and env_uid and env_uid == uid:
                 return True
             if uemail:
-                if env_email and (env_email == uemail or uemail in env_email):
-                    return True
-                if env_mod and (env_mod == uemail or uemail in env_mod):
-                    return True
+                for key in ("user_email", "submitted_by", "approved_by", "assigned_approver", "last_modified_by"):
+                    if _norm_email(env.get(key)) == uemail:
+                        return True
         except Exception:
             pass
 
     return False
+
+
+def _clean_status(raw_val: Any) -> str:
+    s = str(raw_val or "").strip()
+    if s in {"Draft", "Pending Review", "In Review", "Pending Sign-Off", "Approved", "Rejected", "Needs Revision", "Superseded"}:
+        return s
+    if s.lower() in {"approved", "signed off", "signed-off"}:
+        return "Approved"
+    if s.lower() in {"rejected", "reject"}:
+        return "Rejected"
+    if s.lower() in {"in review", "in-review", "reviewing"}:
+        return "In Review"
+    if s.lower() in {"pending sign-off", "pending sign off", "pending-sign-off"}:
+        return "Pending Sign-Off"
+    if s.lower() in {"needs revision", "revision"}:
+        return "Needs Revision"
+    return "Pending Review"
+
+
+def _apply_log_envelope(row: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the JSON envelope stored in `error` onto the extraction-log row.
+
+    assigned_approver / submitted_by / document_status live in that envelope on
+    Tbl_PM_Extraction_logs (they are not always real Fabric columns). The
+    pending-approvals bell depends on these fields being present.
+    """
+    if not row:
+        return row
+    for k, v in list(row.items()):
+        lk = str(k).lower()
+        if lk not in row:
+            row[lk] = v
+    raw_env = str(row.get("error") or "").strip()
+    if raw_env.startswith("{") and raw_env.endswith("}"):
+        try:
+            env = json.loads(raw_env)
+            row["document_status"] = env.get("document_status") or row.get("document_status") or "Pending Review"
+            row["approved_by"] = env.get("approved_by") or row.get("approved_by")
+            row["approved_at"] = env.get("approved_at") or row.get("approved_at")
+            row["submitted_by"] = env.get("submitted_by") or row.get("submitted_by") or env.get("user_email")
+            row["assigned_approver"] = env.get("assigned_approver") or row.get("assigned_approver")
+            row["rejection_notes"] = env.get("rejection_notes") or row.get("rejection_notes")
+            row["user_id"] = env.get("user_id") or row.get("user_id")
+            row["user_email"] = env.get("user_email") or row.get("user_email")
+            row["user_role"] = env.get("user_role") or row.get("user_role")
+            doc_meta = env.get("doc_metadata") or {}
+            if doc_meta:
+                row["doc_title"] = doc_meta.get("title") or doc_meta.get("equipment_model") or row.get("doc_title")
+                row["oem_manufacturer"] = doc_meta.get("oem_manufacturer") or row.get("oem_manufacturer")
+        except Exception:
+            pass
+    if not row.get("document_status"):
+        row["document_status"] = "Pending Review"
+    else:
+        row["document_status"] = _clean_status(row.get("document_status"))
+    return row
+
+
+def _safe_doc_metadata(d: Any) -> Optional[DocumentMetadata]:
+    if not isinstance(d, dict):
+        return None
+    from ..models import DocumentMetadata
+    return DocumentMetadata(
+        title=str(d.get("title") or "NA"),
+        oem_manufacturer=str(d.get("oem_manufacturer") or "NA"),
+        equipment_model=str(d.get("equipment_model") or "NA"),
+        equipment_type=str(d.get("equipment_type") or "NA"),
+        document_version=str(d.get("document_version") or "NA"),
+        publication_date=str(d.get("publication_date") or "NA"),
+    )
 
 
 def list_done_extracts(
@@ -286,70 +650,82 @@ def list_done_extracts(
     top = max(1, min(int(limit or 100), 500))
     uid = str(user_id or "").strip()
     uemail = str(user_email or "").strip().lower()
-    rows: list[dict[str, Any]] = []
-    fabric_success = False
 
-    # 1. Primary: Query Microsoft Fabric SQL
+    # Fast in-memory TTL cache lookup
+    cache_key = f"{top}:{uid}:{uemail}"
+    now_ts = time.time()
+    with _cache_lock:
+        if cache_key in _LIST_EXTRACTS_CACHE:
+            c_time, c_rows = _LIST_EXTRACTS_CACHE[cache_key]
+            if now_ts - c_time < _LIST_EXTRACTS_TTL:
+                return [dict(r) for r in c_rows]
+
+    rows: list[dict[str, Any]] = []
+
+    # 1. Primary: Query Microsoft Fabric SQL Lakehouse
     try:
         conn = fabric_sql.connect()
         try:
             cur = conn.cursor()
             known_cols = fabric_sql._get_table_columns(conn, "Tbl_PM_Extraction_logs")
 
-            # Build parameterized Fabric SQL query
+            # Project lightweight summary columns. `error` MUST be included — it
+            # holds the JSON envelope with assigned_approver / submitted_by.
+            proj_cols = [
+                "run_id", "filename", "content_hash", "drive_item_id", "etag",
+                "status", "overall_score", "maintenance_count", "spare_parts_count",
+                "troubleshooting_count", "engine", "parse_strategy", "extracted_at",
+                "doc_title", "oem_manufacturer", "equipment_model", "equipment_type",
+                "document_version", "publication_date", "document_status",
+                "approved_by", "approved_at", "assigned_approver", "rejection_notes",
+                "user_id", "user_email", "user_role", "duration_ms", "error",
+            ]
+            valid_proj = [c for c in proj_cols if not known_cols or c in known_cols]
+            if valid_proj and "error" not in valid_proj and (not known_cols or "error" in known_cols):
+                valid_proj.append("error")
+            cols_sql = ", ".join(valid_proj) if valid_proj else "*"
+
             if uid or uemail:
                 clauses: list[str] = []
                 params: list[Any] = []
 
-                if uid and "user_id" in known_cols:
+                if uid and (not known_cols or "user_id" in known_cols):
                     clauses.append("user_id = ?")
                     params.append(uid)
-                if uemail and "user_email" in known_cols:
+                if uemail and (not known_cols or "user_email" in known_cols):
                     clauses.append("LOWER(user_email) = ?")
                     params.append(uemail)
-                if uid:
-                    clauses.append("error LIKE ?")
-                    params.append(f'%"{uid}"%')
-                if uemail:
-                    clauses.append("error LIKE ?")
-                    params.append(f'%"{uemail}"%')
+                if uemail and "submitted_by" in known_cols:
+                    clauses.append("LOWER(submitted_by) = ?")
+                    params.append(uemail)
+                if uemail and (not known_cols or "approved_by" in known_cols):
+                    clauses.append("LOWER(approved_by) = ?")
+                    params.append(uemail)
+                if uemail and "assigned_approver" in known_cols:
+                    clauses.append("LOWER(assigned_approver) = ?")
+                    params.append(uemail)
+                if uemail and (not known_cols or "engine" in known_cols):
                     clauses.append("engine LIKE ?")
                     params.append(f"%{uemail}%")
+                # Envelope identity (assigned_approver, submitted_by, user_email)
+                if uid and (not known_cols or "error" in known_cols):
+                    clauses.append("error LIKE ?")
+                    params.append(f'%"{uid}"%')
+                if uemail and (not known_cols or "error" in known_cols):
+                    clauses.append("error LIKE ?")
+                    params.append(f'%"{uemail}"%')
 
-                where_sql = f"WHERE ({' OR '.join(clauses)})"
-                sql = f"SELECT TOP {top} * FROM Tbl_PM_Extraction_logs {where_sql} ORDER BY extracted_at DESC"
+                where_sql = f"WHERE ({' OR '.join(clauses)})" if clauses else ""
+                sql = f"SELECT TOP {top} {cols_sql} FROM Tbl_PM_Extraction_logs {where_sql} ORDER BY extracted_at DESC"
                 cur.execute(sql, tuple(params))
             else:
                 cur.execute(
-                    f"SELECT TOP {top} * FROM Tbl_PM_Extraction_logs ORDER BY extracted_at DESC"
+                    f"SELECT TOP {top} {cols_sql} FROM Tbl_PM_Extraction_logs ORDER BY extracted_at DESC"
                 )
 
             cols = [c[0] for c in cur.description]
-            f_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-            for r in f_rows:
-                raw_env = str(r.get("error") or "").strip()
-                if raw_env.startswith("{") and raw_env.endswith("}"):
-                    try:
-                        env = json.loads(raw_env)
-                        r["document_status"] = env.get("document_status") or r.get("document_status") or "Pending Review"
-                        r["approved_by"] = env.get("approved_by") or r.get("approved_by")
-                        r["approved_at"] = env.get("approved_at") or r.get("approved_at")
-                        r["submitted_by"] = env.get("submitted_by") or r.get("submitted_by") or env.get("user_email")
-                        r["assigned_approver"] = env.get("assigned_approver") or r.get("assigned_approver")
-                        r["rejection_notes"] = env.get("rejection_notes") or r.get("rejection_notes")
-                        r["user_id"] = env.get("user_id") or r.get("user_id")
-                        r["user_email"] = env.get("user_email") or r.get("user_email")
-                        r["user_role"] = env.get("user_role") or r.get("user_role")
-                        doc_meta = env.get("doc_metadata") or {}
-                        if doc_meta:
-                            r["doc_title"] = doc_meta.get("title") or doc_meta.get("equipment_model") or r.get("doc_title")
-                            r["oem_manufacturer"] = doc_meta.get("oem_manufacturer") or r.get("oem_manufacturer")
-                    except Exception:
-                        pass
-                if not r.get("document_status"):
-                    r["document_status"] = "Pending Review"
+            f_rows = [_apply_log_envelope(dict(zip(cols, r))) for r in cur.fetchall()]
             rows.extend(f_rows)
-            fabric_success = True
         finally:
             conn.close()
     except Exception as err:
@@ -377,8 +753,9 @@ def list_done_extracts(
             existing = next((r for r in rows if str(r.get("run_id") or "") == cid), None)
             if existing is not None:
                 existing.update(c)
+                _apply_log_envelope(existing)
             elif cid not in known_run_ids:
-                fresh_rows.append(c)
+                fresh_rows.append(_apply_log_envelope(dict(c)))
                 known_run_ids.add(cid)
 
     rows = fresh_rows + rows
@@ -387,7 +764,11 @@ def list_done_extracts(
     if uid or uemail:
         rows = [r for r in rows if _row_matches_user(r, user_id=uid, user_email=uemail)]
 
-    return rows[:top]
+    final_result = rows[:top]
+    with _cache_lock:
+        _LIST_EXTRACTS_CACHE[cache_key] = (now_ts, [dict(r) for r in final_result])
+
+    return final_result
 
 
 def get_done_run(run_id: str) -> Optional[dict[str, Any]]:
@@ -409,35 +790,14 @@ def get_done_run(run_id: str) -> Optional[dict[str, Any]]:
             row = cur.fetchone()
             if row:
                 cols = [c[0] for c in cur.description]
-                r = dict(zip(cols, row))
-                raw_env = str(r.get("error") or "").strip()
-                if raw_env.startswith("{") and raw_env.endswith("}"):
-                    try:
-                        env = json.loads(raw_env)
-                        r["document_status"] = env.get("document_status") or r.get("document_status") or "Pending Review"
-                        r["approved_by"] = env.get("approved_by") or r.get("approved_by")
-                        r["approved_at"] = env.get("approved_at") or r.get("approved_at")
-                        r["submitted_by"] = env.get("submitted_by") or r.get("submitted_by") or env.get("user_email")
-                        r["assigned_approver"] = env.get("assigned_approver") or r.get("assigned_approver")
-                        r["rejection_notes"] = env.get("rejection_notes") or r.get("rejection_notes")
-                        r["user_id"] = env.get("user_id") or r.get("user_id")
-                        r["user_email"] = env.get("user_email") or r.get("user_email")
-                        r["user_role"] = env.get("user_role") or r.get("user_role")
-                        doc_meta = env.get("doc_metadata") or {}
-                        if doc_meta:
-                            r["doc_title"] = doc_meta.get("title") or doc_meta.get("equipment_model") or r.get("doc_title")
-                            r["oem_manufacturer"] = doc_meta.get("oem_manufacturer") or r.get("oem_manufacturer")
-                    except Exception:
-                        pass
-                if not r.get("document_status"):
-                    r["document_status"] = "Pending Review"
-                return r
+                return _apply_log_envelope(dict(zip(cols, row)))
         finally:
             conn.close()
     except Exception as err:
         logger.debug("Fabric get_done_run notice: %s", err)
 
-    return _load_from_cache(run_id)
+    cached = _load_from_cache(run_id)
+    return _apply_log_envelope(cached) if cached else None
 
 
 def _fetch_table(conn: Any, table: str, run_id: str) -> list[dict[str, Any]]:
@@ -476,31 +836,19 @@ def load_extract_from_fabric(
     *,
     filename: str,
     overall_score: float | None = None,
+    cached_record: Optional[dict[str, Any]] = None,
 ) -> ExtractResponse:
     from ..models import DocumentMetadata
 
     spares_raw: list[dict[str, Any]] = []
     maint_raw: list[dict[str, Any]] = []
     trouble_raw: list[dict[str, Any]] = []
-    log_meta: dict[str, Any] = {}
-
-    try:
-        conn = fabric_sql.connect()
-        try:
-            spares_raw = _fetch_table(conn, "Tbl_PM_Spare_Parts", run_id)
-            maint_raw = _fetch_table(conn, "Tbl_PM_Maintenance", run_id)
-            trouble_raw = _fetch_table(conn, "Tbl_PM_Troubleshooting", run_id)
-        finally:
-            conn.close()
-    except Exception as err:
-        logger.debug("Fabric load_extract_from_fabric db notice: %s", err)
-
-    log_meta = get_done_run(run_id) or {}
+    log_meta: dict[str, Any] = dict(cached_record) if cached_record else {}
 
     cached_fallback = _load_from_cache(run_id)
     if cached_fallback:
         if not log_meta:
-            log_meta = cached_fallback
+            log_meta = dict(cached_fallback)
         if not spares_raw and cached_fallback.get("spare_parts"):
             spares_raw = cached_fallback["spare_parts"]
         if not maint_raw and cached_fallback.get("maintenance"):
@@ -530,43 +878,82 @@ def load_extract_from_fabric(
         except Exception:
             pass
 
-    # If envelope contains staged/edited records from review-sync or raw_payload, prefer them over baseline raw tables
+    # If envelope is empty and Fabric SQL is configured, fetch from Lakehouse
+    if not (envelope.get("spare_parts") or envelope.get("raw_payload") or spares_raw or maint_raw or trouble_raw):
+        try:
+            conn = fabric_sql.connect()
+            try:
+                spares_raw = _fetch_table(conn, "Tbl_PM_Spare_Parts", run_id)
+                maint_raw = _fetch_table(conn, "Tbl_PM_Maintenance", run_id)
+                trouble_raw = _fetch_table(conn, "Tbl_PM_Troubleshooting", run_id)
+            finally:
+                conn.close()
+        except Exception as err:
+            logger.debug("Fabric load_extract_from_fabric db notice: %s", err)
+
+        if not log_meta:
+            log_meta = get_done_run(run_id) or {}
+            raw_env = str(log_meta.get("error") or "").strip()
+            if raw_env.startswith("{") and raw_env.endswith("}"):
+                try:
+                    parsed = json.loads(raw_env)
+                    if isinstance(parsed, dict):
+                        envelope.update(parsed)
+                except Exception:
+                    pass
+
+    # Prioritize edited_payload first, then working arrays, then Lakehouse relational rows, then raw_payload
+    edited_p = envelope.get("edited_payload") if isinstance(envelope.get("edited_payload"), dict) else {}
+    raw_p = envelope.get("raw_payload") if isinstance(envelope.get("raw_payload"), dict) else {}
+
     spares_source = (
-        envelope.get("spare_parts")
-        if (envelope.get("spare_parts") and isinstance(envelope.get("spare_parts"), list))
+        edited_p.get("spare_parts")
+        if (isinstance(edited_p.get("spare_parts"), list) and len(edited_p.get("spare_parts")) > 0)
         else (
-            envelope.get("edited_payload", {}).get("spare_parts")
-            if (isinstance(envelope.get("edited_payload"), dict) and isinstance(envelope["edited_payload"].get("spare_parts"), list))
+            envelope.get("spare_parts")
+            if (isinstance(envelope.get("spare_parts"), list) and len(envelope.get("spare_parts")) > 0)
             else (
-                envelope.get("raw_payload", {}).get("spare_parts")
-                if (isinstance(envelope.get("raw_payload"), dict) and isinstance(envelope["raw_payload"].get("spare_parts"), list))
-                else spares_raw
+                spares_raw
+                if spares_raw
+                else (
+                    raw_p.get("spare_parts")
+                    if isinstance(raw_p.get("spare_parts"), list)
+                    else []
+                )
             )
         )
     )
     maint_source = (
-        envelope.get("maintenance")
-        if (envelope.get("maintenance") and isinstance(envelope.get("maintenance"), list))
+        edited_p.get("maintenance")
+        if (isinstance(edited_p.get("maintenance"), list) and len(edited_p.get("maintenance")) > 0)
         else (
-            envelope.get("edited_payload", {}).get("maintenance")
-            if (isinstance(envelope.get("edited_payload"), dict) and isinstance(envelope["edited_payload"].get("maintenance"), list))
+            envelope.get("maintenance")
+            if (isinstance(envelope.get("maintenance"), list) and len(envelope.get("maintenance")) > 0)
             else (
-                envelope.get("raw_payload", {}).get("maintenance")
-                if (isinstance(envelope.get("raw_payload"), dict) and isinstance(envelope["raw_payload"].get("maintenance"), list))
-                else maint_raw
+                maint_raw
+                if maint_raw
+                else (
+                    raw_p.get("maintenance")
+                    if isinstance(raw_p.get("maintenance"), list)
+                    else []
+                )
             )
         )
     )
     trouble_source = (
-        envelope.get("troubleshooting")
-        if (envelope.get("troubleshooting") and isinstance(envelope.get("troubleshooting"), list))
+        edited_p.get("troubleshooting")
+        if (isinstance(edited_p.get("troubleshooting"), list) and len(edited_p.get("troubleshooting")) > 0)
         else (
-            envelope.get("edited_payload", {}).get("troubleshooting")
-            if (isinstance(envelope.get("edited_payload"), dict) and isinstance(envelope["edited_payload"].get("troubleshooting"), list))
+            envelope.get("troubleshooting")
+            if (isinstance(envelope.get("troubleshooting"), list) and len(envelope.get("troubleshooting")) > 0)
             else (
-                envelope.get("raw_payload", {}).get("troubleshooting")
-                if (isinstance(envelope.get("raw_payload"), dict) and isinstance(envelope["raw_payload"].get("troubleshooting"), list))
-                else trouble_raw
+                trouble_raw
+                if trouble_raw
+                else (
+                    raw_p.get("troubleshooting")
+                    if isinstance(raw_p.get("troubleshooting"), list)
+                    else []
+                )
             )
         )
     )
@@ -576,7 +963,7 @@ def load_extract_from_fabric(
         if isinstance(d, dict):
             q = _quality_from_row(d) if ("fields_filled_score" in d or "grounding_available" in d) else d.get("quality")
             rev_tags = _extract_review_tags_from_text(d.get("quality_reasons") or "")
-            row_status = str(d.get("status") or rev_tags.get("status") or "Pending Review")
+            row_status = _clean_status(d.get("status") or rev_tags.get("status"))
             spares.append(
                 SparePartRow(
                     id=int(d.get("id") or len(spares) + 1),
@@ -602,7 +989,7 @@ def load_extract_from_fabric(
                     rejection_reason=d.get("rejection_reason"),
                 )
             )
-        else:
+        elif isinstance(d, SparePartRow):
             spares.append(d)
 
     for i, r in enumerate(spares, 1):
@@ -613,7 +1000,7 @@ def load_extract_from_fabric(
         if isinstance(d, dict):
             q = _quality_from_row(d) if ("fields_filled_score" in d or "grounding_available" in d) else d.get("quality")
             rev_tags = _extract_review_tags_from_text(d.get("remarks") or "")
-            row_status = str(d.get("status") or rev_tags.get("status") or "Pending Review")
+            row_status = _clean_status(d.get("status") or rev_tags.get("status"))
             maint.append(
                 MaintenanceRow(
                     id=int(d.get("id") or len(maint) + 1),
@@ -636,7 +1023,7 @@ def load_extract_from_fabric(
                     rejection_reason=d.get("rejection_reason"),
                 )
             )
-        else:
+        elif isinstance(d, MaintenanceRow):
             maint.append(d)
 
     for i, r in enumerate(maint, 1):
@@ -647,7 +1034,7 @@ def load_extract_from_fabric(
         if isinstance(d, dict):
             q = _quality_from_row(d) if ("fields_filled_score" in d or "grounding_available" in d) else d.get("quality")
             rev_tags = _extract_review_tags_from_text(d.get("quality_reasons") or "")
-            row_status = str(d.get("status") or rev_tags.get("status") or "Pending Review")
+            row_status = _clean_status(d.get("status") or rev_tags.get("status"))
             trouble.append(
                 TroubleshootingRow(
                     id=int(d.get("id") or len(trouble) + 1),
@@ -665,7 +1052,7 @@ def load_extract_from_fabric(
                     rejection_reason=d.get("rejection_reason"),
                 )
             )
-        else:
+        elif isinstance(d, TroubleshootingRow):
             trouble.append(d)
 
     for i, r in enumerate(trouble, 1):
@@ -699,9 +1086,11 @@ def load_extract_from_fabric(
             publication_date=str(doc_date or "NA"),
         )
 
-    doc_status = str(log_meta.get("document_status") or envelope.get("document_status") or "Pending Review")
+    doc_status = _clean_status(log_meta.get("document_status") or envelope.get("document_status") or "Pending Review")
     approved_by = log_meta.get("approved_by") or envelope.get("approved_by")
     approved_at = str(log_meta.get("approved_at") or envelope.get("approved_at") or "") or None
+    assigned_approver = log_meta.get("assigned_approver") or envelope.get("assigned_approver")
+    submitted_by = log_meta.get("submitted_by") or envelope.get("submitted_by") or log_meta.get("user_email") or envelope.get("user_email")
     rejection_reason = log_meta.get("rejection_notes") or envelope.get("rejection_notes")
     resolved_filename = str(envelope.get("filename") or log_meta.get("filename") or filename or "document.pdf")
 
@@ -737,7 +1126,7 @@ def load_extract_from_fabric(
                 pdf_order=int(d.get("pdf_order") or idx),
                 confidence=float(d.get("confidence") or 1.0),
                 quality=q,
-                status=str(d.get("status") or "Pending Review"),
+                status=_clean_status(d.get("status")),
             )
 
         def _dict_to_mt(d, idx):
@@ -757,7 +1146,7 @@ def load_extract_from_fabric(
                 pdf_order=int(d.get("pdf_order") or idx),
                 confidence=float(d.get("confidence") or 1.0),
                 quality=q,
-                status=str(d.get("status") or "Pending Review"),
+                status=_clean_status(d.get("status")),
             )
 
         def _dict_to_tr(d, idx):
@@ -772,14 +1161,13 @@ def load_extract_from_fabric(
                 pdf_order=int(d.get("pdf_order") or idx),
                 confidence=float(d.get("confidence") or 1.0),
                 quality=q,
-                status=str(d.get("status") or "Pending Review"),
+                status=_clean_status(d.get("status")),
             )
 
         b_spares = [_dict_to_sp(d, i+1) for i, d in enumerate(raw_p.get("spare_parts") or [])]
         b_maint = [_dict_to_mt(d, i+1) for i, d in enumerate(raw_p.get("maintenance") or [])]
         b_trouble = [_dict_to_tr(d, i+1) for i, d in enumerate(raw_p.get("troubleshooting") or [])]
-        b_meta_dict = raw_p.get("doc_metadata") if isinstance(raw_p.get("doc_metadata"), dict) else None
-        b_doc_meta = DocumentMetadata(**b_meta_dict) if b_meta_dict else None
+        b_doc_meta = _safe_doc_metadata(raw_p.get("doc_metadata"))
 
         from ..models import BaselineExtraction
         baseline_obj = BaselineExtraction(
@@ -826,22 +1214,23 @@ def load_extract_from_fabric(
         raw_payload=raw_p if isinstance(raw_p, dict) else None,
         edited_payload=envelope.get("edited_payload") if isinstance(envelope.get("edited_payload"), dict) else None,
         meta=ExtractMeta(
-            filename=filename,
+            filename=resolved_filename,
             engine="fabric-cache",
             parse_strategy="cache",
             pages_total=int(log_meta.get("pages_total") or envelope.get("pages_total") or 0),
             pages_processed=int(log_meta.get("pages_processed") or envelope.get("pages_processed") or 0),
-            maintenance_count=len(maint),
-            spare_parts_count=len(spares),
-            troubleshooting_count=len(trouble),
-            warnings=["Loaded from Fabric central repository."],
             overall_score=score,
+            duration_ms=int(log_meta.get("duration_ms") or envelope.get("duration_ms") or 0),
             run_id=run_id,
+            content_hash=str(log_meta.get("content_hash") or envelope.get("content_hash") or ""),
+            drive_item_id=str(log_meta.get("drive_item_id") or envelope.get("drive_item_id") or "") or None,
+            etag=str(log_meta.get("etag") or envelope.get("etag") or "") or None,
             doc_metadata=doc_meta,
             document_status=doc_status,
-            approved_by=approved_by,
-            approved_at=approved_at,
-            rejection_reason=rejection_reason,
+            approved_by=str(approved_by) if approved_by else None,
+            approved_at=str(approved_at) if approved_at else None,
+            assigned_approver=str(assigned_approver) if assigned_approver else None,
+            submitted_by=str(submitted_by) if submitted_by else None,
             has_diff=has_diff,
         ),
     )
@@ -901,85 +1290,281 @@ def _qf(row: Any, ai_text: str) -> dict[str, Any]:
     }
 
 
+def _dump_row_list(rows: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows or []:
+        if hasattr(r, "model_dump"):
+            out.append(r.model_dump())
+        elif isinstance(r, dict):
+            out.append(dict(r))
+    return out
+
+
+def _canonical_raw_payload(result: ExtractResponse, now_iso: str, doc_meta_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable AI baseline. Prefer existing raw_payload / baseline over working rows."""
+    existing = getattr(result, "raw_payload", None)
+    if isinstance(existing, dict) and (
+        existing.get("spare_parts") is not None
+        or existing.get("maintenance") is not None
+        or existing.get("troubleshooting") is not None
+        or existing.get("doc_metadata")
+    ):
+        return {
+            "spare_parts": list(existing.get("spare_parts") or []),
+            "maintenance": list(existing.get("maintenance") or []),
+            "troubleshooting": list(existing.get("troubleshooting") or []),
+            "doc_metadata": existing.get("doc_metadata") or doc_meta_dict,
+            "extracted_at": existing.get("extracted_at") or now_iso,
+        }
+    baseline = getattr(result, "baseline", None)
+    if baseline is not None:
+        b_meta = getattr(baseline, "doc_metadata", None)
+        b_meta_dict = b_meta.model_dump() if b_meta and hasattr(b_meta, "model_dump") else (b_meta if isinstance(b_meta, dict) else doc_meta_dict)
+        return {
+            "spare_parts": _dump_row_list(getattr(baseline, "spare_parts", None)),
+            "maintenance": _dump_row_list(getattr(baseline, "maintenance", None)),
+            "troubleshooting": _dump_row_list(getattr(baseline, "troubleshooting", None)),
+            "doc_metadata": b_meta_dict or doc_meta_dict,
+            "extracted_at": getattr(baseline, "extracted_at", None) or now_iso,
+        }
+    return {
+        "spare_parts": _dump_row_list(result.spare_parts),
+        "maintenance": _dump_row_list(result.maintenance),
+        "troubleshooting": _dump_row_list(result.troubleshooting),
+        "doc_metadata": doc_meta_dict,
+        "extracted_at": now_iso,
+    }
+
+
+def _clone_rows_pending(rows: Any) -> list:
+    cloned = []
+    for r in rows or []:
+        if hasattr(r, "model_dump"):
+            data = r.model_dump()
+            data["status"] = "Pending Review"
+            data["reviewed_by"] = None
+            data["reviewed_at"] = None
+            data["rejection_reason"] = None
+            try:
+                cloned.append(type(r)(**data))
+                continue
+            except Exception:
+                pass
+        cloned.append(r)
+    return cloned
+
+
+def _apply_globally_approved_for_new_user(result: ExtractResponse) -> bool:
+    """Preserve globally approved state for any uploader (read-only approved view)."""
+    if not result or not result.meta:
+        return False
+    prior_by = getattr(result.meta, "approved_by", None)
+    prior_at = getattr(result.meta, "approved_at", None)
+
+    result.meta.document_status = "Approved"
+    result.meta.already_approved = True
+    result.meta.prior_approved_by = str(prior_by) if prior_by else None
+    result.meta.prior_approved_at = str(prior_at) if prior_at else None
+
+    for collection in (result.spare_parts, result.maintenance, result.troubleshooting):
+        for r in collection or []:
+            if hasattr(r, "status") and _clean_status(getattr(r, "status", None)) != "Rejected":
+                r.status = "Approved"
+                if prior_by and hasattr(r, "reviewed_by") and not getattr(r, "reviewed_by", None):
+                    r.reviewed_by = prior_by
+                if prior_at and hasattr(r, "reviewed_at") and not getattr(r, "reviewed_at", None):
+                    r.reviewed_at = prior_at
+
+    warnings = list(result.meta.warnings or [])
+    who = prior_by or "an approver"
+    when = f" on {prior_at}" if prior_at else ""
+    notice = (
+        f"This document was already signed off by {who}{when}. "
+        "Review is complete — no further action required."
+    )
+    if notice not in warnings:
+        warnings.append(notice)
+    result.meta.warnings = warnings
+    return True
+
+
+def resolve_global_approved_cache_view(
+    result: ExtractResponse,
+    log_row: dict[str, Any],
+    *,
+    keep_run_id: Optional[str] = None,
+) -> ExtractResponse:
+    """Upgrade a pending duplicate to the globally approved view when one exists."""
+    if not result or not result.meta:
+        return result
+    if _clean_status(getattr(result.meta, "document_status", None)) == "Approved":
+        return result
+
+    content_hash = _row_content_hash(log_row)
+    if not content_hash:
+        return result
+
+    approved_row = find_approved_run_by_content_hash(content_hash)
+    if not approved_row or not approved_row.get("run_id"):
+        return result
+
+    approved_rid = str(approved_row["run_id"])
+    current_rid = str(keep_run_id or log_row.get("run_id") or getattr(result.meta, "run_id", "") or "")
+    if approved_rid == current_rid:
+        _apply_globally_approved_for_new_user(result)
+        return result
+
+    approved_result = load_extract_from_fabric(
+        approved_rid,
+        filename=str(log_row.get("filename") or "document.pdf"),
+        overall_score=(
+            float(approved_row["overall_score"])
+            if approved_row.get("overall_score") is not None
+            else None
+        ),
+        cached_record=approved_row,
+    )
+    if not approved_result:
+        return result
+
+    _apply_globally_approved_for_new_user(approved_result)
+    if current_rid:
+        approved_result.meta.run_id = current_rid
+    return approved_result
+
+
+def _isolate_cache_hit_for_new_user(result: ExtractResponse) -> bool:
+    """Reset cloned cache hits so Approved status/sign-off metadata is not copied.
+
+    Working rows start from the AI baseline (not another tenant's edits).
+    Returns True when the source document was previously signed off.
+    """
+    if not result or not result.meta:
+        return False
+    prior_status = _clean_status(getattr(result.meta, "document_status", None))
+    already = prior_status == "Approved"
+    prior_by = getattr(result.meta, "approved_by", None)
+    prior_at = getattr(result.meta, "approved_at", None)
+
+    baseline = getattr(result, "baseline", None)
+    if baseline is not None:
+        result.spare_parts = _clone_rows_pending(getattr(baseline, "spare_parts", None))
+        result.maintenance = _clone_rows_pending(getattr(baseline, "maintenance", None))
+        result.troubleshooting = _clone_rows_pending(getattr(baseline, "troubleshooting", None))
+        if getattr(baseline, "doc_metadata", None):
+            result.meta.doc_metadata = baseline.doc_metadata
+        result.edited_payload = None
+        result.meta.has_diff = False
+    else:
+        for collection in (result.spare_parts, result.maintenance, result.troubleshooting):
+            for r in collection or []:
+                if hasattr(r, "status"):
+                    r.status = "Pending Review"
+                    r.reviewed_by = None
+                    r.reviewed_at = None
+                    if hasattr(r, "rejection_reason"):
+                        r.rejection_reason = None
+
+    result.meta.document_status = "Pending Review"
+    result.meta.approved_by = None
+    result.meta.approved_at = None
+    result.meta.already_approved = already
+    result.meta.prior_approved_by = str(prior_by) if already and prior_by else None
+    result.meta.prior_approved_at = str(prior_at) if already and prior_at else None
+    if already:
+        warnings = list(result.meta.warnings or [])
+        who = prior_by or "an approver"
+        when = f" on {prior_at}" if prior_at else ""
+        notice = (
+            f"This document was already signed off by {who}{when}. "
+            "A new pending copy was created for your workspace; the original AI baseline was preserved."
+        )
+        if notice not in warnings:
+            warnings.append(notice)
+        result.meta.warnings = warnings
+    return already
+
+
 def save_extract_to_fabric(
     *,
     file_bytes: bytes,
     filename: str,
     result: ExtractResponse,
-    content_hash: str | None = None,
-    drive_item_id: str | None = None,
-    etag: str | None = None,
-    user_id: str | None = None,
-    user_email: str | None = None,
-    user_role: str | None = None,
-    duration_ms: int | None = None,
+    content_hash: Optional[str] = None,
+    drive_item_id: Optional[str] = None,
+    etag: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_role: Optional[str] = None,
+    duration_ms: Optional[int] = None,
 ) -> str:
     content_hash = content_hash or file_sha256(file_bytes)
     run_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).replace(tzinfo=None)
+    invalidate_extracts_list_cache()
 
     meta_obj = getattr(result.meta, "doc_metadata", None)
     doc_meta_dict = meta_obj.model_dump() if meta_obj else {}
-    doc_status = str(getattr(result.meta, "document_status", "Pending Review") or "Pending Review")
+    doc_status = getattr(result.meta, "document_status", "Pending Review") or "Pending Review"
     approved_by = getattr(result.meta, "approved_by", None)
     approved_at = getattr(result.meta, "approved_at", None)
-    rejection_notes = getattr(result.meta, "rejection_reason", None)
+    rejection_notes = getattr(result.meta, "rejection_notes", None)
 
-    # Resolve assigned approver for this user if configured
+    # Determine assigned approver based on user
     assigned_approver = None
-    try:
-        from ..auth import store as auth_store
-        if user_email:
+    if user_email:
+        try:
+            from ..auth import store as auth_store
             u_rec = auth_store.find_by_email(user_email)
-            if u_rec:
+            if u_rec and u_rec.get("assigned_approver"):
                 assigned_approver = u_rec.get("assigned_approver")
-        if not assigned_approver and user_id:
-            u_rec = auth_store.find_by_id(user_id)
-            if u_rec:
-                assigned_approver = u_rec.get("assigned_approver")
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # Prepare baseline extraction snapshot (immutable raw AI payload)
-    raw_spares = [(s.model_dump() if hasattr(s, "model_dump") else dict(s)) for s in result.spare_parts]
-    raw_maint = [(m.model_dump() if hasattr(m, "model_dump") else dict(m)) for m in result.maintenance]
-    raw_trouble = [(t.model_dump() if hasattr(t, "model_dump") else dict(t)) for t in result.troubleshooting]
+    # Build canonical JSON baseline snapshot (raw_payload).
+    # Preserve the original AI baseline when present; never overwrite it with working edits.
+    raw_payload = _canonical_raw_payload(result, now.isoformat(), doc_meta_dict)
+    raw_spares = [s.model_dump() for s in result.spare_parts]
+    raw_maint = [m.model_dump() for m in result.maintenance]
+    raw_trouble = [t.model_dump() for t in result.troubleshooting]
 
-    raw_payload = {
+    edited_payload = getattr(result, "edited_payload", None) or {
         "spare_parts": [dict(r) for r in raw_spares],
         "maintenance": [dict(r) for r in raw_maint],
         "troubleshooting": [dict(r) for r in raw_trouble],
-        "doc_metadata": dict(doc_meta_dict),
-        "extracted_at": now.isoformat(),
-    }
-
-    edited_payload = {
-        "spare_parts": [dict(r) for r in raw_spares],
-        "maintenance": [dict(r) for r in raw_maint],
-        "troubleshooting": [dict(r) for r in raw_trouble],
-        "doc_metadata": dict(doc_meta_dict),
+        "doc_metadata": doc_meta_dict,
+        "last_modified_by": user_email,
         "last_modified_at": now.isoformat(),
     }
 
-    # Build JSON Envelope for non-breaking Fabric persistence
     envelope = {
         "_v": 2,
         "run_id": run_id,
-        "filename": filename,
         "content_hash": content_hash,
         "drive_item_id": drive_item_id,
+        "etag": etag,
+        "filename": filename,
         "raw_payload": raw_payload,
         "edited_payload": edited_payload,
         "doc_metadata": doc_meta_dict,
+        "document_status": doc_status,
+        "approved_by": approved_by,
+        "approved_at": approved_at,
+        "submitted_by": user_email,
+        "assigned_approver": assigned_approver,
+        "rejection_notes": rejection_notes,
+        "user_id": user_id,
+        "user_email": user_email,
+        "user_role": user_role,
         "doc_title": getattr(meta_obj, "title", None) if meta_obj else None,
         "oem_manufacturer": getattr(meta_obj, "oem_manufacturer", None) if meta_obj else None,
         "equipment_model": getattr(meta_obj, "equipment_model", None) if meta_obj else None,
         "equipment_type": getattr(meta_obj, "equipment_type", None) if meta_obj else None,
         "document_version": getattr(meta_obj, "document_version", None) if meta_obj else None,
         "publication_date": getattr(meta_obj, "publication_date", None) if meta_obj else None,
-        "document_status": doc_status,
         "approved_by": approved_by,
         "approved_at": approved_at,
+        "submitted_by": user_email,
         "assigned_approver": assigned_approver,
         "rejection_notes": rejection_notes,
         "user_id": user_id,
@@ -992,10 +1577,14 @@ def save_extract_to_fabric(
         "maintenance": [dict(r) for r in raw_maint],
         "troubleshooting": [dict(r) for r in raw_trouble],
     }
-    envelope_json = json.dumps(envelope, ensure_ascii=False)
+    # Full envelope for local cache; slim JSON for VARCHAR(2000) Fabric `error` column.
+    envelope_json_full = json.dumps(envelope, ensure_ascii=False)
+    envelope_json = _envelope_json_for_log_column(envelope)
 
     raw_engine = str(getattr(result.meta, "engine", "") or "")
     engine_with_user = f"{raw_engine} [user:{user_email}]" if user_email and "[" not in raw_engine else raw_engine
+    if len(engine_with_user) > 100:
+        engine_with_user = engine_with_user[:97] + "..."
 
     extract_record = {
         "run_id": run_id,
@@ -1012,7 +1601,7 @@ def save_extract_to_fabric(
         "engine": engine_with_user,
         "parse_strategy": str(getattr(result.meta, "parse_strategy", "") or ""),
         "extracted_at": now.isoformat(),
-        "error": envelope_json,
+        "error": envelope_json_full,
         "doc_title": getattr(meta_obj, "title", None) if meta_obj else None,
         "oem_manufacturer": getattr(meta_obj, "oem_manufacturer", None) if meta_obj else None,
         "equipment_model": getattr(meta_obj, "equipment_model", None) if meta_obj else None,
@@ -1052,6 +1641,7 @@ def save_extract_to_fabric(
                         "content_hash": content_hash,
                         "filename": filename,
                         "status": "done",
+                        "document_status": doc_status,
                         "overall_score": float(getattr(result.meta, "overall_score", 0) or 0),
                         "maintenance_count": len(result.maintenance),
                         "spare_parts_count": len(result.spare_parts),
@@ -1066,7 +1656,6 @@ def save_extract_to_fabric(
                         "equipment_type": getattr(meta_obj, "equipment_type", None) if meta_obj else None,
                         "document_version": getattr(meta_obj, "document_version", None) if meta_obj else None,
                         "publication_date": getattr(meta_obj, "publication_date", None) if meta_obj else None,
-                        "document_status": doc_status,
                         "approved_by": approved_by,
                         "approved_at": approved_at,
                         "assigned_approver": assigned_approver,
@@ -1075,76 +1664,84 @@ def save_extract_to_fabric(
                         "user_email": user_email,
                         "user_role": user_role,
                         "duration_ms": duration_ms,
-                        "pages_total": int(getattr(result.meta, "pages_total", 0) or 0),
-                        "pages_processed": int(getattr(result.meta, "pages_processed", 0) or 0),
-                        "grounding_pass_rate": float(getattr(result.meta, "grounding_pass_rate", 1.0) or 1.0),
-                        "filter_drop_rate": float(getattr(result.meta, "filter_drop_rate", 0.0) or 0.0),
-                        "low_confidence_count": int(getattr(result.meta, "low_confidence_count", 0) or 0),
                     },
                 )
 
-                spare_rows = []
-                for row in result.spare_parts:
-                    d = row.model_dump() if hasattr(row, "model_dump") else dict(row)
-                    d["run_id"] = run_id
-                    d["page"] = str(d.get("page") or "")
-                    d.update(_qf(row, f"{d.get('part_name','')} {d.get('part_number_code','')} {d.get('drawing_model_no','')}"))
-                    spare_rows.append({c: d.get(c) for c in SPARE_COLS})
-                fabric_sql.insert_many(conn, "Tbl_PM_Spare_Parts", SPARE_COLS, spare_rows)
+                if result.spare_parts:
+                    try:
+                        spare_rows = []
+                        for row in result.spare_parts:
+                            d = row.model_dump()
+                            d["run_id"] = run_id
+                            d["page"] = str(d.get("page") or "")
+                            d.update(_qf(row, f"{d.get('part_name','')} {d.get('part_number_code','')} {d.get('drawing_model_no','')}"))
+                            spare_rows.append({c: d.get(c) for c in SPARE_COLS})
+                        fabric_sql.insert_many(conn, "Tbl_PM_Spare_Parts", SPARE_COLS, spare_rows)
+                    except Exception as tbl_err:
+                        logger.warning("Fabric spare_parts insert notice: %s", tbl_err)
 
-                maint_rows = []
-                for row in result.maintenance:
-                    d = row.model_dump() if hasattr(row, "model_dump") else dict(row)
-                    d["run_id"] = run_id
-                    d["page"] = str(d.get("page") or "")
-                    ai = d.get("checks_instructions") or d.get("maintenance_work_description")
-                    d.update(_qf(row, str(ai or "")))
-                    if not d.get("attended_by") or d.get("attended_by") == "NA":
-                        d["attended_by"] = user_email or "NA"
-                    r_stat = d.get("status") or "Pending Review"
-                    rem = str(d.get("remarks") or "")
-                    if r_stat and r_stat != "Pending Review" and f"[{r_stat}]" not in rem:
-                        d["remarks"] = f"[{r_stat}] {rem}".strip()
-                    maint_rows.append({c: d.get(c) for c in MAINT_COLS})
-                fabric_sql.insert_many(conn, "Tbl_PM_Maintenance", MAINT_COLS, maint_rows)
+                if result.maintenance:
+                    try:
+                        maint_rows = []
+                        for row in result.maintenance:
+                            d = row.model_dump()
+                            d["run_id"] = run_id
+                            d["page"] = str(d.get("page") or "")
+                            ai = d.get("checks_instructions") or d.get("maintenance_work_description")
+                            d.update(_qf(row, str(ai or "")))
+                            if not d.get("attended_by") or d.get("attended_by") == "NA":
+                                d["attended_by"] = user_email or "NA"
+                            r_stat = d.get("status") or "Pending Review"
+                            rem = str(d.get("remarks") or "")
+                            if r_stat and r_stat != "Pending Review" and f"[{r_stat}]" not in rem:
+                                d["remarks"] = f"[{r_stat}] {rem}".strip()
+                            maint_rows.append({c: d.get(c) for c in MAINT_COLS})
+                        fabric_sql.insert_many(conn, "Tbl_PM_Maintenance", MAINT_COLS, maint_rows)
+                    except Exception as tbl_err:
+                        logger.warning("Fabric maintenance insert notice: %s", tbl_err)
 
-                trouble_rows = []
-                for row in result.troubleshooting:
-                    d = row.model_dump() if hasattr(row, "model_dump") else dict(row)
-                    d["run_id"] = run_id
-                    d["page"] = str(d.get("page") or "")
-                    d.update(_qf(row, f"{d.get('problem','')} {d.get('root_cause_solution','')}"))
-                    trouble_rows.append({c: d.get(c) for c in TROUBLE_COLS})
-                fabric_sql.insert_many(conn, "Tbl_PM_Troubleshooting", TROUBLE_COLS, trouble_rows)
+                if result.troubleshooting:
+                    try:
+                        trouble_rows = []
+                        for row in result.troubleshooting:
+                            d = row.model_dump()
+                            d["run_id"] = run_id
+                            d["page"] = str(d.get("page") or "")
+                            d.update(_qf(row, f"{d.get('problem','')} {d.get('root_cause_solution','')}"))
+                            trouble_rows.append({c: d.get(c) for c in TROUBLE_COLS})
+                        fabric_sql.insert_many(conn, "Tbl_PM_Troubleshooting", TROUBLE_COLS, trouble_rows)
+                    except Exception as tbl_err:
+                        logger.warning("Fabric troubleshooting insert notice: %s", tbl_err)
 
-                # Record audit event
+                # Audit after log insert (independent of row-table failures)
                 try:
-                    fabric_sql.insert_audit_event(
+                    _emit_extract_audit(
                         conn,
-                        {
-                            "event_id": uuid.uuid4().hex,
-                            "event_type": "EXTRACT_SAVED",
-                            "run_id": run_id,
-                            "filename": filename,
-                            "user_id": user_id,
-                            "user_email": user_email,
-                            "user_role": user_role,
-                            "details_json": json.dumps({
-                                "maintenance_count": len(result.maintenance),
-                                "spare_parts_count": len(result.spare_parts),
-                                "troubleshooting_count": len(result.troubleshooting),
-                                "overall_score": getattr(result.meta, "overall_score", 0),
-                                "document_status": doc_status,
-                            }),
-                            "created_at": now,
+                        event_type="EXTRACT_COMPLETE",
+                        run_id=run_id,
+                        content_hash=content_hash,
+                        filename=filename,
+                        user_id=user_id,
+                        user_email=user_email,
+                        user_role=user_role,
+                        from_status=None,
+                        to_status=doc_status,
+                        details={
+                            "content_hash": content_hash,
+                            "document_status": doc_status,
+                            "overall_score": float(getattr(result.meta, "overall_score", 0) or 0),
+                            "maintenance_count": len(result.maintenance),
+                            "spare_parts_count": len(result.spare_parts),
+                            "troubleshooting_count": len(result.troubleshooting),
+                            "envelope_slim": envelope_json != envelope_json_full,
                         },
                     )
                 except Exception as audit_err:
-                    logger.debug("Fabric audit log insert skipped: %s", audit_err)
+                    logger.warning("Audit insert notice: %s", audit_err)
             finally:
                 conn.close()
         except Exception as fabric_err:
-            logger.warning("Fabric save notice (stored in persistent cache): %s", fabric_err)
+            logger.warning("Fabric save_extract_to_fabric notice: %s", fabric_err)
 
     if hasattr(result, "meta") and result.meta:
         result.meta.run_id = run_id
@@ -1176,6 +1773,7 @@ def update_fabric_review_state(
         return False
 
     log_row = get_done_run(run_id) or {}
+    previous_status = _clean_status(log_row.get("document_status"))
 
     # Parse existing envelope if present
     envelope = {}
@@ -1187,6 +1785,11 @@ def update_fabric_review_state(
             pass
     if not envelope:
         envelope = dict(log_row)
+
+    if not previous_status:
+        previous_status = _clean_status(envelope.get("document_status"))
+
+    content_hash = _row_content_hash(log_row) or str(envelope.get("content_hash") or "").strip().lower() or None
 
     # Ensure raw_payload is preserved or seeded if missing from legacy records
     if "raw_payload" not in envelope or not envelope["raw_payload"]:
@@ -1215,13 +1818,25 @@ def update_fabric_review_state(
     envelope["approved_by"] = approved_by
     envelope["approved_at"] = approved_at
     envelope["rejection_notes"] = rejection_notes
+
+    # Preserve original creator / submitter so document never disappears from Editor's My Extracts
+    orig_user_id = envelope.get("user_id") or log_row.get("user_id")
+    orig_user_email = envelope.get("user_email") or log_row.get("user_email")
+    orig_submitted_by = envelope.get("submitted_by") or log_row.get("submitted_by") or orig_user_email
+    orig_approver = envelope.get("assigned_approver") or log_row.get("assigned_approver")
+
+    if orig_user_id: envelope["user_id"] = orig_user_id
+    if orig_user_email: envelope["user_email"] = orig_user_email
+    if orig_submitted_by: envelope["submitted_by"] = orig_submitted_by
+    if orig_approver: envelope["assigned_approver"] = orig_approver
+
     if user_email:
         envelope["last_modified_by"] = user_email
         envelope["last_modified_at"] = datetime.now(timezone.utc).isoformat()
         if not envelope.get("user_email"):
-            envelope["user_email"] = user_email
+            envelope["user_email"] = orig_user_email or user_email
         if not envelope.get("submitted_by"):
-            envelope["submitted_by"] = user_email
+            envelope["submitted_by"] = orig_submitted_by or user_email
         if not envelope.get("assigned_approver"):
             try:
                 from ..auth import store as auth_store
@@ -1253,6 +1868,7 @@ def update_fabric_review_state(
         envelope["troubleshooting"] = edited_tr
 
     updated_env_json = json.dumps(envelope, ensure_ascii=False)
+    fabric_env_json = _envelope_json_for_log_column(envelope)
 
     # 1. Update resilient cache
     cached_rec = _load_from_cache(run_id) or dict(log_row)
@@ -1261,8 +1877,10 @@ def update_fabric_review_state(
     cached_rec["approved_by"] = approved_by
     cached_rec["approved_at"] = approved_at
     cached_rec["rejection_notes"] = rejection_notes
-    cached_rec["submitted_by"] = envelope.get("submitted_by")
-    cached_rec["assigned_approver"] = envelope.get("assigned_approver")
+    cached_rec["user_id"] = orig_user_id or cached_rec.get("user_id")
+    cached_rec["user_email"] = orig_user_email or cached_rec.get("user_email")
+    cached_rec["submitted_by"] = orig_submitted_by or cached_rec.get("submitted_by")
+    cached_rec["assigned_approver"] = orig_approver or cached_rec.get("assigned_approver")
     cached_rec["last_modified_by"] = user_email
     cached_rec["last_modified_at"] = datetime.now(timezone.utc).isoformat()
     if doc_metadata and isinstance(doc_metadata, dict):
@@ -1355,66 +1973,90 @@ def update_fabric_review_state(
                 doc_v = meta_in.get("document_version") or envelope.get("document_version") or log_row.get("document_version")
                 doc_d = meta_in.get("publication_date") or envelope.get("publication_date") or log_row.get("publication_date")
 
-                try:
+                known_log = fabric_sql._get_table_columns(conn, "Tbl_PM_Extraction_logs")
+                # Build UPDATE from columns that actually exist (legacy WH has only ~14 cols).
+                set_parts: list[str] = []
+                params: list[Any] = []
+                if not known_log or "error" in known_log:
+                    set_parts.append("error = ?")
+                    params.append(fabric_env_json)
+                for col, val in [
+                    ("document_status", document_status),
+                    ("approved_by", approved_by),
+                    ("approved_at", approved_at),
+                    ("rejection_notes", rejection_notes),
+                    ("spare_parts_count", sp_cnt),
+                    ("maintenance_count", m_cnt),
+                    ("troubleshooting_count", t_cnt),
+                    ("doc_title", doc_t),
+                    ("oem_manufacturer", doc_o),
+                    ("equipment_model", doc_m),
+                    ("equipment_type", doc_ty),
+                    ("document_version", doc_v),
+                    ("publication_date", doc_d),
+                ]:
+                    if not known_log or col in known_log:
+                        set_parts.append(f"{col} = ?")
+                        params.append(val)
+                if set_parts:
+                    params.append(run_id)
                     cur.execute(
-                        """UPDATE Tbl_PM_Extraction_logs 
-                           SET error = ?, document_status = ?, approved_by = ?, approved_at = ?, rejection_notes = ?,
-                               spare_parts_count = ?, maintenance_count = ?, troubleshooting_count = ?,
-                               doc_title = ?, oem_manufacturer = ?, equipment_model = ?, equipment_type = ?,
-                               document_version = ?, publication_date = ?
-                           WHERE run_id = ?""",
-                        (updated_env_json, document_status, approved_by, approved_at, rejection_notes,
-                         sp_cnt, m_cnt, t_cnt, doc_t, doc_o, doc_m, doc_ty, doc_v, doc_d, run_id),
-                    )
-                except Exception:
-                    cur.execute(
-                        """UPDATE Tbl_PM_Extraction_logs 
-                           SET error = ?, document_status = ?, approved_by = ?, approved_at = ?, rejection_notes = ?,
-                               spare_parts_count = ?, maintenance_count = ?, troubleshooting_count = ?
-                           WHERE run_id = ?""",
-                        (updated_env_json, document_status, approved_by, approved_at, rejection_notes, sp_cnt, m_cnt, t_cnt, run_id),
+                        f"UPDATE Tbl_PM_Extraction_logs SET {', '.join(set_parts)} WHERE run_id = ?",
+                        tuple(params),
                     )
                 if cur.rowcount == 0:
                     try:
-                        fabric_sql.upsert_extraction_log(conn, cached_rec)
+                        slim_rec = dict(cached_rec)
+                        slim_rec["error"] = fabric_env_json
+                        fabric_sql.upsert_extraction_log(conn, slim_rec)
                     except Exception as ins_err:
-                        logger.debug("Failed to upsert extraction log in Fabric: %s", ins_err)
+                        logger.warning("Failed to upsert extraction log in Fabric: %s", ins_err)
                 conn.commit()
                 cur.close()
 
                 # Stream review update audit event
                 try:
-                    now = datetime.now(timezone.utc).replace(tzinfo=None)
-                    fabric_sql.insert_audit_event(
+                    _emit_extract_audit(
                         conn,
-                        {
-                            "event_id": uuid.uuid4().hex,
-                            "event_type": "REVIEW_SYNC",
-                            "run_id": run_id,
-                            "filename": str(log_row.get("filename") or ""),
-                            "user_id": user_id,
-                            "user_email": user_email or approved_by,
-                            "user_role": user_role,
-                            "details_json": json.dumps({
-                                "document_status": document_status,
-                                "approved_by": approved_by,
-                                "rejection_notes": rejection_notes,
-                                "spare_parts_count": sp_cnt,
-                                "maintenance_count": m_cnt,
-                                "troubleshooting_count": t_cnt,
-                            }),
-                            "created_at": now,
+                        event_type="REVIEW_SYNC",
+                        run_id=run_id,
+                        content_hash=content_hash,
+                        filename=str(log_row.get("filename") or ""),
+                        user_id=user_id,
+                        user_email=user_email or approved_by,
+                        user_role=user_role,
+                        from_status=previous_status or None,
+                        to_status=document_status,
+                        details={
+                            "content_hash": content_hash,
+                            "document_status": document_status,
+                            "approved_by": approved_by,
+                            "rejection_notes": rejection_notes,
+                            "spare_parts_count": sp_cnt,
+                            "maintenance_count": m_cnt,
+                            "troubleshooting_count": t_cnt,
                         },
                     )
                 except Exception as audit_err:
-                    logger.debug("Review sync audit insert skipped: %s", audit_err)
+                    logger.warning("Review sync audit insert skipped: %s", audit_err)
             finally:
                 conn.close()
         except Exception as fabric_err:
             logger.debug("Fabric review sync update notice: %s", fabric_err)
 
+    invalidate_extracts_list_cache()
+    if _clean_status(document_status) == "Approved":
+        try:
+            ch = str(log_row.get("content_hash") or envelope.get("content_hash") or "").strip()
+            supersede_duplicate_runs(
+                run_id,
+                content_hash=ch or None,
+                user_id=orig_user_id,
+                user_email=orig_user_email or user_email,
+            )
+        except Exception:
+            pass
     return True
-
 
 
 async def extract_with_fabric_cache(
@@ -1443,47 +2085,158 @@ async def extract_with_fabric_cache(
             filename=filename,
         )
         if cached and cached.get("run_id"):
-            cached_run_id = str(cached["run_id"])
+            approved_global = await asyncio.to_thread(
+                find_approved_run_by_content_hash,
+                content_hash,
+            )
+
+            # Reuse the current user's existing history row for this file (no duplicate insert).
+            existing_user_run = None
+            if user_id or user_email:
+                existing_user_run = await asyncio.to_thread(
+                    find_user_run_by_content_hash,
+                    content_hash,
+                    user_id=user_id,
+                    user_email=user_email,
+                )
+            if existing_user_run and existing_user_run.get("run_id"):
+                user_status = _clean_status(existing_user_run.get("document_status"))
+                # Pending duplicates are upgraded when a globally approved copy exists.
+                if user_status == "Approved" or not approved_global:
+                    reuse_run_id = str(existing_user_run["run_id"])
+                    if on_progress:
+                        on_progress("Reusing your existing document record…", 0.25)
+                    result = await asyncio.to_thread(
+                        load_extract_from_fabric,
+                        reuse_run_id,
+                        filename=filename,
+                        overall_score=(
+                            float(existing_user_run["overall_score"])
+                            if existing_user_run.get("overall_score") is not None
+                            else None
+                        ),
+                        cached_record=existing_user_run,
+                    )
+                    if result:
+                        if approved_global and user_status != "Approved":
+                            result = await asyncio.to_thread(
+                                resolve_global_approved_cache_view,
+                                result,
+                                existing_user_run,
+                                keep_run_id=reuse_run_id,
+                            )
+                            try:
+                                new_run_id = await asyncio.to_thread(
+                                    save_extract_to_fabric,
+                                    file_bytes=file_bytes,
+                                    filename=filename,
+                                    result=result,
+                                    content_hash=content_hash,
+                                    drive_item_id=drive_item_id or existing_user_run.get("drive_item_id"),
+                                    etag=etag or existing_user_run.get("etag"),
+                                    user_id=user_id,
+                                    user_email=user_email,
+                                    user_role=user_role,
+                                    duration_ms=duration_ms or 0,
+                                )
+                                if new_run_id:
+                                    result.meta.run_id = new_run_id
+                                    await asyncio.to_thread(
+                                        supersede_duplicate_runs,
+                                        new_run_id,
+                                        content_hash=content_hash,
+                                        user_id=user_id,
+                                        user_email=user_email,
+                                    )
+                            except Exception as save_err:
+                                logger.warning(
+                                    "Failed to persist upgraded approved cache hit: %s", save_err
+                                )
+                                result.meta.run_id = reuse_run_id
+                        elif hasattr(result, "meta") and result.meta:
+                            result.meta.run_id = reuse_run_id
+                        if hasattr(result, "meta") and result.meta:
+                            result.meta.engine = "fabric-cache"
+                        if on_progress:
+                            on_progress("Loaded existing document record (no duplicate created)", 1.0)
+                        return result
+
+            source = approved_global if approved_global else cached
+            source_run_id = str(source["run_id"])
             if on_progress:
                 on_progress("Loading extract from cache (deduplicated)…", 0.2)
             result = await asyncio.to_thread(
                 load_extract_from_fabric,
-                cached_run_id,
+                source_run_id,
                 filename=filename,
                 overall_score=(
-                    float(cached["overall_score"])
-                    if cached.get("overall_score") is not None
+                    float(source["overall_score"])
+                    if source.get("overall_score") is not None
                     else None
                 ),
+                cached_record=source,
             )
             if result:
                 if hasattr(result, "meta") and result.meta:
-                    result.meta.run_id = cached_run_id
+                    result.meta.run_id = source_run_id
                     result.meta.engine = "fabric-cache"
 
-                # If this user is not yet associated with the cached run, link/save extract to user's history
-                cached_uemail = str(cached.get("user_email") or "").strip().lower()
-                if user_email and cached_uemail != user_email.strip().lower():
-                    if on_progress:
-                        on_progress("Linking extract to user history…", 0.9)
-                    try:
-                        new_run_id = await asyncio.to_thread(
-                            save_extract_to_fabric,
-                            file_bytes=file_bytes,
-                            filename=filename,
-                            result=result,
+                if approved_global:
+                    already_signed = _apply_globally_approved_for_new_user(result)
+                else:
+                    already_signed = _isolate_cache_hit_for_new_user(result)
+
+                # Log extraction execution event in Fabric Lakehouse & user history
+                if on_progress:
+                    on_progress("Logging extraction event to Fabric repository…", 0.9)
+                try:
+                    new_run_id = await asyncio.to_thread(
+                        save_extract_to_fabric,
+                        file_bytes=file_bytes,
+                        filename=filename,
+                        result=result,
+                        content_hash=content_hash,
+                        drive_item_id=drive_item_id or cached.get("drive_item_id"),
+                        etag=etag or cached.get("etag"),
+                        user_id=user_id,
+                        user_email=user_email,
+                        user_role=user_role,
+                        duration_ms=duration_ms or 0,
+                    )
+                    if hasattr(result, "meta") and result.meta and new_run_id:
+                        result.meta.run_id = new_run_id
+                    if approved_global and new_run_id:
+                        await asyncio.to_thread(
+                            supersede_duplicate_runs,
+                            new_run_id,
                             content_hash=content_hash,
-                            drive_item_id=drive_item_id or cached.get("drive_item_id"),
-                            etag=etag or cached.get("etag"),
                             user_id=user_id,
                             user_email=user_email,
-                            user_role=user_role,
-                            duration_ms=duration_ms or 0,
                         )
-                        if hasattr(result, "meta") and result.meta and new_run_id:
-                            result.meta.run_id = new_run_id
-                    except Exception as save_err:
-                        logger.warning("Failed to link cached extract for user: %s", save_err)
+                    if already_signed and user_email:
+                        try:
+                            from ..notifications import create_notification
+                            title = filename
+                            doc_md = getattr(result.meta, "doc_metadata", None)
+                            if doc_md is not None and getattr(doc_md, "title", None):
+                                title = doc_md.title
+                            body = (
+                                "This document was previously signed off and is shown as Approved in your workspace."
+                                if approved_global
+                                else "This document was previously signed off. A new pending copy was created for your workspace; the original AI baseline was preserved."
+                            )
+                            create_notification(
+                                recipient_email=user_email,
+                                event_type="already_approved",
+                                run_id=str(getattr(result.meta, "run_id", None) or source_run_id),
+                                title=str(title or filename),
+                                actor_email=getattr(result.meta, "prior_approved_by", None),
+                                body=body,
+                            )
+                        except Exception as nerr:
+                            logger.debug("Cache-hit already-approved notification skipped: %s", nerr)
+                except Exception as save_err:
+                    logger.warning("Failed to log deduplicated extract to Fabric: %s", save_err)
 
                 if on_progress:
                     on_progress("Loaded from central repository (deduplicated)", 1.0)
@@ -1529,4 +2282,3 @@ async def extract_with_fabric_cache(
         result.meta.warnings = warnings
 
     return result
-

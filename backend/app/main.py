@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import time
@@ -35,11 +35,25 @@ from .extract_audit import build_audit_record, record_extract_outcome, update_ex
 from .extractors import extract_document
 from .integrations import fabric_sql, graph_sharepoint
 from .integrations.fabric_cache import (
+    _clean_status,
     extract_with_fabric_cache,
     get_done_run,
     list_done_extracts,
     load_extract_from_fabric,
+    resolve_assigned_approver,
+    resolve_global_approved_cache_view,
     update_fabric_review_state,
+    user_can_sign_off_extract,
+    user_can_view_extract,
+    user_owns_extract,
+)
+from .notifications import (
+    create_notification,
+    list_for_user as list_notifications_for_user,
+    mark_all_read as mark_all_notifications_read,
+    mark_read as mark_notification_read,
+    unread_count as notification_unread_count,
+    upsert_document_notification,
 )
 from .models import (
     ExtractJobCreateResponse,
@@ -59,6 +73,7 @@ from .models import (
 from .security import create_share_token, decode_share_token
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB upload cap for memory safety
+_PENDING_STATUSES = {"Pending Sign-Off", "Pending Review", "In Review", "Needs Revision"}
 API_VERSION = "1.0.0"
 JOB_TTL_SECONDS = 6 * 60 * 60
 
@@ -505,7 +520,7 @@ def _fabric_summary_from_row(row: dict[str, Any]) -> FabricExtractSummary:
         except Exception:
             pass
 
-    doc_status = row.get("document_status") or envelope.get("document_status") or "Pending Review"
+    doc_status = _clean_status(row.get("document_status") or envelope.get("document_status") or "Pending Review")
     approved_by = row.get("approved_by") or envelope.get("approved_by")
     approved_at = row.get("approved_at") or envelope.get("approved_at")
     if approved_at is not None and not isinstance(approved_at, str):
@@ -627,19 +642,16 @@ async def api_fabric_pending_approvals_list(
     approver_identifiers: set[str] = set()
 
     if user and user.role == "approver":
-        if user.email:
-            approver_identifiers.add(user.email.strip().lower())
-        if user.id:
-            approver_identifiers.add(str(user.id).strip().lower())
-        if user.display_name:
-            approver_identifiers.add(user.display_name.strip().lower())
+        user_email_l = (user.email or "").strip().lower()
+        if user_email_l:
+            approver_identifiers.add(user_email_l)
 
         try:
             from .auth import store as auth_store
             all_users = auth_store.list_users()
             for u in all_users:
                 assigned = (u.assigned_approver or "").strip().lower()
-                if assigned and (assigned in approver_identifiers or any(ident in assigned for ident in approver_identifiers if ident)):
+                if assigned and user_email_l and assigned == user_email_l:
                     if u.email:
                         subordinate_emails.add(u.email.strip().lower())
                     if u.id:
@@ -652,31 +664,38 @@ async def api_fabric_pending_approvals_list(
         if not r.get("run_id"):
             continue
         summary = _fabric_summary_from_row(r)
-        d_status = (summary.document_status or "Pending Review").strip()
-        # Pending review states: Pending Sign-Off, Pending Review, In Review, Needs Revision
-        if d_status not in {"Pending Sign-Off", "Pending Review", "In Review", "Needs Revision"}:
+        d_status = _clean_status(summary.document_status)
+        if d_status == "Superseded" or d_status not in _PENDING_STATUSES:
             continue
 
         if not user or user.role == "admin":
-            # Global admin oversight or non-auth dev mode
             items.append(summary)
-        elif user.role == "approver":
-            # Strictly scoped to assigned approver mapping
-            doc_assigned = (summary.assigned_approver or "").strip().lower()
-            if doc_assigned and (doc_assigned in approver_identifiers or any(ident in doc_assigned for ident in approver_identifiers if ident)):
+            continue
+
+        submitter_email = (
+            summary.submitted_by
+            or r.get("submitted_by")
+            or r.get("user_email")
+            or ""
+        )
+        submitter_email = str(submitter_email).strip().lower()
+        submitter_id = str(r.get("user_id") or "").strip().lower()
+        doc_assigned = str(summary.assigned_approver or r.get("assigned_approver") or "").strip().lower()
+
+        if user.role == "approver":
+            user_email_l = (user.email or "").strip().lower()
+            if doc_assigned and user_email_l and doc_assigned == user_email_l:
                 items.append(summary)
                 continue
-
-            submitter_email = (summary.submitted_by or "").strip().lower()
-            submitter_id = str(r.get("user_id") or "").strip().lower()
-            if (submitter_email and submitter_email in subordinate_emails) or (submitter_id and submitter_id in subordinate_ids):
+            if (submitter_email and submitter_email in subordinate_emails) or (
+                submitter_id and submitter_id in subordinate_ids
+            ):
                 items.append(summary)
                 continue
         else:
-            # Standard editor/viewer: only own pending items
-            submitter_email = (summary.submitted_by or "").strip().lower()
-            submitter_id = str(r.get("user_id") or "").strip().lower()
-            if (user.email and submitter_email == user.email.strip().lower()) or (user.id and submitter_id == str(user.id).strip().lower()):
+            user_email = (user.email or "").strip().lower()
+            user_id = str(user.id or "").strip().lower()
+            if (user_email and submitter_email == user_email) or (user_id and submitter_id == user_id):
                 items.append(summary)
 
     return FabricExtractListResponse(items=items, count=len(items), configured=True)
@@ -693,23 +712,27 @@ async def api_fabric_extract_get(
     try:
         meta = await asyncio.to_thread(get_done_run, rid)
         if not meta:
-            raise HTTPException(status_code=404, detail="Extract run not found.")
+            raise HTTPException(status_code=404, detail=f"Extract run not found: {rid}")
 
-        # Data scoping access check:
-        # Admins and Approvers can access any run; standard users can only access their own runs.
-        if user and user.role not in {"admin", "approver"}:
-            from .integrations.fabric_cache import _row_matches_user
-            if not _row_matches_user(meta, user_id=user.id, user_email=user.email):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Access Denied: You do not have permission to view this extraction.",
-                )
+        # Owner, assigned approver, or admin only. Unassigned approvers cannot view other tenants.
+        if user and not user_can_view_extract(meta, user):
+            raise HTTPException(
+                status_code=403,
+                detail="Access Denied: You do not have permission to view this extraction.",
+            )
 
         result = await asyncio.to_thread(
             load_extract_from_fabric,
             rid,
             filename=str(meta.get("filename") or "document.pdf"),
             overall_score=(float(meta["overall_score"]) if meta.get("overall_score") is not None else None),
+            cached_record=meta,
+        )
+        result = await asyncio.to_thread(
+            resolve_global_approved_cache_view,
+            result,
+            meta,
+            keep_run_id=rid,
         )
     except HTTPException:
         raise
@@ -732,14 +755,29 @@ async def api_fabric_extract_review_sync(
     user_email = getattr(user, "email", None) if user else (payload.approved_by or "reviewer@local")
     user_role = getattr(user, "role", "user") if user else "user"
 
-    # Enforce role guard: Only Approvers and Admins can perform final sign-off or rejection
-    if payload.document_status in {"Approved", "Rejected"} and user and user_role not in {"admin", "approver"}:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Permission Denied: User '{user_email}' with role '{user_role}' cannot perform final sign-off. Approver or Admin role is required."
-        )
+    meta = await asyncio.to_thread(get_done_run, rid)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Fabric extract run not found or sync failed.")
+
+    if user:
+        if payload.document_status in {"Approved", "Rejected"}:
+            if not user_can_sign_off_extract(meta, user):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Permission Denied: User '{user_email}' cannot perform final sign-off. "
+                        "Only the assigned approver or an admin may approve or reject this document."
+                    ),
+                )
+        else:
+            if not user_can_view_extract(meta, user):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access Denied: You do not have permission to modify this extraction.",
+                )
 
     doc_meta_dict = payload.doc_metadata.model_dump() if payload.doc_metadata else None
+    previous_status = _clean_status(meta.get("document_status"))
 
     ok = await asyncio.to_thread(
         update_fabric_review_state,
@@ -772,6 +810,17 @@ async def api_fabric_extract_review_sync(
     except Exception:
         pass
 
+    _fanout_review_notifications(
+        meta,
+        payload.document_status,
+        user_email,
+        rid,
+        previous_status=previous_status,
+        spare_parts=payload.spare_parts,
+        maintenance=payload.maintenance,
+        troubleshooting=payload.troubleshooting,
+    )
+
     return {"status": "ok", "message": "Fabric review state synchronized successfully", "run_id": rid}
 
 
@@ -780,9 +829,6 @@ async def api_fabric_extract_share(
     run_id: str,
     user: Annotated[Optional[UserPublic], Depends(require_user_if_auth)],
 ) -> ShareLinkResponse:
-    _ = user
-    from datetime import datetime, timedelta, timezone
-
     rid = (run_id or "").strip()
     if not rid:
         raise HTTPException(status_code=400, detail="run_id is required.")
@@ -790,6 +836,12 @@ async def api_fabric_extract_share(
     meta = await asyncio.to_thread(get_done_run, rid)
     if not meta:
         raise HTTPException(status_code=404, detail="Extract run not found.")
+
+    if user and user.role != "admin" and not user_owns_extract(meta, user):
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Only the document owner can create a share link.",
+        )
 
     secret = get_jwt_secret()
     share_token = create_share_token(run_id=rid, secret=secret, expire_hours=24)
@@ -804,6 +856,121 @@ async def api_fabric_extract_share(
         expires_at=expires_at,
         expires_in_hours=24,
     )
+
+
+def _fanout_review_notifications(
+    meta: dict[str, Any],
+    document_status: str,
+    actor_email: Optional[str],
+    run_id: str,
+    *,
+    previous_status: Optional[str] = None,
+    spare_parts: Optional[list[Any]] = None,
+    maintenance: Optional[list[Any]] = None,
+    troubleshooting: Optional[list[Any]] = None,
+) -> None:
+    """Event-driven notifications: submit → assigned approver; sign-off/revision → editor.
+
+    Only fires on document-level status transitions (not row-level In Review saves).
+    """
+    try:
+        status = _clean_status(document_status)
+        prev = _clean_status(previous_status or meta.get("document_status"))
+        # Row-level saves during review must not spam notifications.
+        if status in {"In Review", "Pending Review"} and prev in {"In Review", "Pending Review", "Pending Sign-Off", "Approved", "Rejected", "Needs Revision"}:
+            return
+        if status == prev:
+            return
+
+        actor = str(actor_email or "").strip().lower()
+        title = str(meta.get("doc_title") or meta.get("filename") or "Document")
+        if isinstance(meta.get("doc_metadata"), dict) and meta["doc_metadata"].get("title"):
+            title = str(meta["doc_metadata"]["title"])
+        assigned = resolve_assigned_approver(meta)
+        owner = str(meta.get("submitted_by") or meta.get("user_email") or "").strip().lower()
+
+        def _row_counts() -> tuple[int, int, int]:
+            rows = list(spare_parts or []) + list(maintenance or []) + list(troubleshooting or [])
+            approved = rejected = pending = 0
+            for r in rows:
+                st = _clean_status((r.get("status") if isinstance(r, dict) else getattr(r, "status", None)) or "Pending Review")
+                if st == "Approved":
+                    approved += 1
+                elif st in {"Rejected", "Needs Revision"}:
+                    rejected += 1
+                else:
+                    pending += 1
+            return approved, rejected, pending
+
+        if status == "Pending Sign-Off" and prev != "Pending Sign-Off":
+            if assigned and assigned != actor:
+                upsert_document_notification(
+                    recipient_email=assigned,
+                    event_type="submitted",
+                    run_id=run_id,
+                    title=title,
+                    actor_email=actor or None,
+                    body=f"{actor or 'An editor'} submitted “{title}” for your review.",
+                )
+        elif status in {"Approved", "Rejected", "Needs Revision"} and prev not in {status}:
+            event = "revision_requested" if status == "Needs Revision" else "signed_off"
+            if owner and owner != actor:
+                verb = {
+                    "Approved": "signed off",
+                    "Rejected": "rejected",
+                    "Needs Revision": "requested revisions on",
+                }.get(status, "updated")
+                appr, rej, pend = _row_counts()
+                total = appr + rej + pend
+                summary = f"{appr} approved, {rej} rejected, {pend} pending" if total else "all records reviewed"
+                upsert_document_notification(
+                    recipient_email=owner,
+                    event_type=event,
+                    run_id=run_id,
+                    title=title,
+                    actor_email=actor or None,
+                    body=f"{actor or 'A reviewer'} {verb} “{title}” ({summary}).",
+                )
+    except Exception as err:
+        logger.debug("Review notification fan-out skipped: %s", err)
+
+
+@app.get("/api/notifications")
+async def api_notifications_list(
+    user: Annotated[Optional[UserPublic], Depends(require_user_if_auth)],
+    unread_only: bool = False,
+    limit: int = 100,
+) -> dict[str, Any]:
+    if not user:
+        if is_auth_required():
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return {"items": [], "count": 0, "unread": 0}
+    items = list_notifications_for_user(user.email, unread_only=unread_only, limit=limit)
+    unread = notification_unread_count(user.email)
+    return {"items": items, "count": len(items), "unread": unread}
+
+
+@app.post("/api/notifications/{notif_id}/read")
+async def api_notifications_mark_read(
+    notif_id: str,
+    user: Annotated[Optional[UserPublic], Depends(require_user_if_auth)],
+) -> dict[str, Any]:
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    ok = mark_notification_read(notif_id, user.email)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Notification not found.")
+    return {"status": "ok", "id": notif_id, "read": True}
+
+
+@app.post("/api/notifications/read-all")
+async def api_notifications_mark_all_read(
+    user: Annotated[Optional[UserPublic], Depends(require_user_if_auth)],
+) -> dict[str, Any]:
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    n = mark_all_notifications_read(user.email)
+    return {"status": "ok", "marked": n}
 
 
 @app.get("/api/share/{token}", response_model=SharedExtractResponse)
@@ -839,6 +1006,7 @@ async def api_public_share_get(token: str) -> SharedExtractResponse:
         rid,
         filename=str(meta.get("filename") or "document.pdf"),
         overall_score=(float(meta["overall_score"]) if meta.get("overall_score") is not None else None),
+        cached_record=meta,
     )
 
     return SharedExtractResponse(

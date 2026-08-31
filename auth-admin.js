@@ -178,6 +178,8 @@ async function loginWithPassword(email, password) {
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.detail || `Login failed (${resp.status})`);
   saveAuthSession(data.access_token, data.user);
+  // Immediately update bell visibility now that we have a confirmed role.
+  applyRoleBasedUi();
   return data.user;
 }
 
@@ -196,6 +198,8 @@ async function refreshMe() {
     sessionStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
     localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
   } catch (e) {}
+  // Show/hide notification bell immediately once we have confirmed user role.
+  applyRoleBasedUi();
   return user;
 }
 
@@ -211,11 +215,8 @@ function applyRoleBasedUi() {
       confSel.dispatchEvent(new Event("change", { bubbles: true }));
     }
   }
-  const role = getUserRole();
-  const notifWrap = document.getElementById("approvals-notif-wrap");
-  if (notifWrap) {
-    notifWrap.hidden = role !== "approver" && role !== "admin";
-  }
+  // Bell is always visible for authenticated users. Dropdown contents are
+  // scoped by GET /api/fabric/pending-approvals (approver mapping / own items).
   if (typeof renderGrid === "function") {
     try { renderGrid(); } catch (e) {}
   }
@@ -298,6 +299,9 @@ function applyUserPolicyToUi() {
     }
 
     applyAssignedModelsToGeminiSelect(u);
+    if (typeof window.updateRoleActionButtons === "function") {
+      window.updateRoleActionButtons();
+    }
   } else {
     if (loginBtn) loginBtn.hidden = false;
     if (profileMenu) profileMenu.hidden = true;
@@ -319,6 +323,9 @@ function applyUserPolicyToUi() {
     if (hint) {
       hint.hidden = true;
       hint.textContent = "";
+    }
+    if (typeof window.updateRoleActionButtons === "function") {
+      window.updateRoleActionButtons();
     }
   }
 
@@ -1932,6 +1939,8 @@ window.isLoggedIn = isLoggedIn;
 window.authState = authState;
 window.refreshMe = refreshMe;
 window.applyUserPolicyToUi = applyUserPolicyToUi;
+window.getUserRole = getUserRole;
+window.getStoredUser = getStoredUser;
 function setAdminView(view) {
   const allowed = new Set(["monitor", "users", "logs", "sharepoint"]);
   const next = allowed.has(view) ? view : "monitor";

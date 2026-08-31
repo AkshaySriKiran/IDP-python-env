@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css?v=124">
+  <link rel="stylesheet" href="styles.css?v=127">
 
   <!-- Apply saved theme before paint to avoid dark/light flash -->
   <script>
@@ -159,22 +159,22 @@
           <span class="rail-dot" id="rail-chat-dot" hidden></span>
         </button>
 
-        <!-- Approver Pending Approvals Notification Bell & Dropdown -->
-        <div class="approvals-notif-wrap" id="approvals-notif-wrap" hidden>
-          <button type="button" class="theme-toggle-btn rail-btn approvals-bell-btn" id="approvals-notif-btn" title="Pending Approvals" aria-expanded="false">
+        <!-- Approver / Admin Pending Approvals Notification Bell & Dropdown -->
+        <div class="approvals-notif-wrap" id="approvals-notif-wrap">
+          <button type="button" class="theme-toggle-btn rail-btn approvals-bell-btn" id="approvals-notif-btn" title="Notifications" aria-expanded="false">
             <i data-lucide="bell"></i>
             <span class="notif-badge-count" id="approvals-notif-count" hidden>0</span>
           </button>
           <div class="approvals-dropdown" id="approvals-dropdown" hidden>
             <div class="approvals-dropdown-header">
               <div class="approvals-header-title">
-                <i data-lucide="clipboard-check"></i>
-                <span>Pending Approvals</span>
+                <i data-lucide="bell"></i>
+                <span>Notifications</span>
               </div>
-              <span class="approvals-header-badge" id="approvals-header-badge">0 Pending</span>
+              <span class="approvals-header-badge" id="approvals-header-badge">0 New</span>
             </div>
             <div class="approvals-dropdown-body" id="approvals-dropdown-list">
-              <div class="approvals-empty">No documents awaiting approval</div>
+              <div class="approvals-empty">No notifications</div>
             </div>
           </div>
         </div>
@@ -453,12 +453,17 @@
                 <span>Audit Diff</span>
               </button>
 
-              <button class="btn btn-secondary" id="signoff-btn" title="Sync review status and partial sign-off to Microsoft Fabric">
-                <i data-lucide="check"></i>
-                <span>Sign-Off</span>
+              <button class="btn btn-secondary" id="save-changes-btn" title="Save current workspace edits to Microsoft Fabric" style="display: none;">
+                <i data-lucide="save"></i>
+                <span>Save Changes</span>
               </button>
 
-              <button class="btn btn-secondary" id="signoff-all-btn" title="Approve and sign off all pending records">
+              <button class="btn btn-secondary" id="signoff-btn" title="Submit workspace changes for approver review" style="display: none;">
+                <i data-lucide="send"></i>
+                <span>Submit for Review</span>
+              </button>
+
+              <button class="btn btn-secondary" id="signoff-all-btn" title="Approve and sign off all pending records" style="display: none;">
                 <i data-lucide="check-check"></i>
                 <span>Sign-Off All</span>
               </button>
@@ -755,6 +760,10 @@
           <span class="diff-stat-label">Custom Rows Added</span>
           <span class="diff-stat-value" id="diff-stat-added" style="color: #10b981;">0</span>
         </div>
+        <div class="diff-summary-stat">
+          <span class="diff-stat-label">Rows Deleted</span>
+          <span class="diff-stat-value" id="diff-stat-deleted" style="color: #ef4444;">0</span>
+        </div>
         <div class="diff-summary-filter">
           <label style="font-size: 0.78rem; font-weight: 600; display: flex; align-items: center; gap: 0.4rem; cursor: pointer; color: var(--text-main);">
             <input type="checkbox" id="diff-filter-changes-only" checked>
@@ -973,7 +982,7 @@
     });
   </script>
 
-  <script src="auth-admin.js?v=52"></script>
-  <script src="app.js?v=86"></script>
+  <script src="auth-admin.js?v=62"></script>
+  <script src="app.js?v=95"></script>
 </body>
 </html>

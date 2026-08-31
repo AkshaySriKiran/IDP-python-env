@@ -54,7 +54,7 @@ def main() -> int:
         "Tbl_PM_Spare_Parts": {"status", "reviewed_by", "reviewed_at", "rejection_reason"},
         "Tbl_PM_Maintenance": {"status", "reviewed_by", "reviewed_at", "rejection_reason"},
         "Tbl_PM_Troubleshooting": {"status", "reviewed_by", "reviewed_at", "rejection_reason"},
-        "Tbl_PM_Audit_Logs": {"event_id", "event_type", "run_id", "user_email"},
+        "Tbl_PM_Audit_Logs": {"event_id", "event_type", "run_id", "content_hash", "user_email", "from_status", "to_status"},
     }
 
     for table in target_tables:

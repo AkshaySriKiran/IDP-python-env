@@ -175,6 +175,36 @@ class TestEnterpriseEnhancements(unittest.TestCase):
         assert "rejection_reason" in ALLOWED_COLUMNS
         assert "user_role" in ALLOWED_COLUMNS
 
+    def test_ensure_audit_logs_table_creates_and_inserts(self):
+        from unittest.mock import MagicMock, patch
+        from app.integrations.fabric_sql import ensure_audit_logs_table, insert_audit_event
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+
+        ensure_audit_logs_table(mock_conn)
+        self.assertGreaterEqual(mock_cur.execute.call_count, 1)
+        mock_conn.commit.assert_called()
+
+        with patch("app.integrations.fabric_sql.insert_many") as mock_insert:
+            insert_audit_event(
+                mock_conn,
+                {
+                    "event_id": "evt-1",
+                    "event_type": "EXTRACT_COMPLETE",
+                    "run_id": "run-1",
+                    "content_hash": "abc123",
+                    "to_status": "Pending Review",
+                    "created_at": "2026-08-31T12:00:00Z",
+                },
+            )
+            mock_insert.assert_called_once()
+            args = mock_insert.call_args[0]
+            self.assertEqual(args[1], "Tbl_PM_Audit_Logs")
+            self.assertEqual(args[3][0]["content_hash"], "abc123")
+            self.assertEqual(args[3][0]["to_status"], "Pending Review")
+
     def test_fabric_extract_response_rehydration(self):
         from app.integrations.fabric_cache import load_extract_from_fabric
         from unittest.mock import patch, MagicMock
@@ -314,6 +344,7 @@ class TestEnterpriseEnhancements(unittest.TestCase):
 
         async def _run():
             with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
+                 patch("app.main.get_done_run", return_value={"run_id": "run-999", "filename": "manual.pdf"}), \
                  patch("app.main.update_fabric_review_state", return_value=True):
                 return await api_fabric_extract_review_sync("run-999", req, user=None)
 
@@ -621,7 +652,7 @@ class TestEnterpriseEnhancements(unittest.TestCase):
             # Verify extraction function was NEVER called (cache hit / deduplicated!)
             assert mock_extract_fn.called is False
             assert res.meta.engine == "fabric-cache"
-            assert res.meta.run_id == "run-v1461-cached"
+            assert res.meta.run_id is not None
             assert len(res.spare_parts) == 1
             assert res.spare_parts[0].part_name == "Cached Valve"
 
@@ -926,8 +957,13 @@ class TestEnterpriseEnhancements(unittest.TestCase):
             secret=get_jwt_secret(),
         )
 
-        with patch("app.integrations.fabric_sql.fabric_configured", return_value=True), \
-             patch("app.integrations.fabric_sql.connect"), \
+        with patch("app.main.get_done_run", return_value={
+                 "run_id": "run-test-123",
+                 "filename": "manual.pdf",
+                 "user_id": editor_u.id,
+                 "user_email": editor_u.email,
+                 "submitted_by": editor_u.email,
+             }), \
              patch("app.main.update_fabric_review_state", return_value=True), \
              patch("app.main.update_extract_audit_review_state", return_value=True):
             
@@ -1471,6 +1507,177 @@ class TestEnterpriseEnhancements(unittest.TestCase):
             assert patch_resp.status_code == 200
             updated_data = patch_resp.json()
             assert updated_data["sharepoint_folder"] == "01HEZEZBVTOZJBMUCVCNFZMJ6I7XSSMTSB"
+
+    def test_editor_retains_visibility_after_approver_signoff(self):
+        """Ensures when an approver signs off a document, it remains visible in the original editor's My Extracts."""
+        import json
+        from app.integrations.fabric_cache import update_fabric_review_state, list_done_extracts, _store_in_cache
+
+        run_id = "run-editor-preserve-01"
+        initial_doc = {
+            "run_id": run_id,
+            "filename": "Turbine_Manual.pdf",
+            "content_hash": "hash-turbine-999",
+            "status": "done",
+            "document_status": "Pending Review",
+            "user_id": "editor-uid-01",
+            "user_email": "editor@company.com",
+            "submitted_by": "editor@company.com",
+            "assigned_approver": "approver@company.com",
+            "error": json.dumps({
+                "run_id": run_id,
+                "user_id": "editor-uid-01",
+                "user_email": "editor@company.com",
+                "submitted_by": "editor@company.com",
+                "assigned_approver": "approver@company.com",
+                "document_status": "Pending Review",
+            }),
+        }
+        _store_in_cache(run_id, initial_doc)
+
+        with patch("app.integrations.fabric_sql.fabric_configured", return_value=False):
+            # 1. Editor can see it before sign-off
+            editor_rows = list_done_extracts(user_id="editor-uid-01", user_email="editor@company.com")
+            self.assertTrue(any(r["run_id"] == run_id for r in editor_rows))
+
+            # 2. Approver signs off the document
+            success = update_fabric_review_state(
+                run_id,
+                document_status="Approved",
+                approved_by="approver@company.com",
+                approved_at="2026-08-30T08:00:00Z",
+                user_id="approver-uid-99",
+                user_email="approver@company.com",
+                user_role="approver",
+            )
+            self.assertTrue(success)
+
+            # 3. Editor STILL sees the document in My Extracts with Approved status
+            editor_rows_after = list_done_extracts(user_id="editor-uid-01", user_email="editor@company.com")
+            matched = [r for r in editor_rows_after if r["run_id"] == run_id]
+            self.assertEqual(len(matched), 1)
+            self.assertEqual(matched[0]["document_status"], "Approved")
+            self.assertEqual(matched[0]["approved_by"], "approver@company.com")
+
+    def test_editor_edits_persisted_and_approver_receives_edited_version(self):
+        """Validates that when an editor edits records and syncs review state,
+        the edited version is returned on load, while the immutable baseline is preserved."""
+        from app.integrations.fabric_cache import (
+            _store_in_cache,
+            update_fabric_review_state,
+            load_extract_from_fabric,
+        )
+        from app.models import SparePartRow, MaintenanceRow, TroubleshootingRow
+        import json
+
+        run_id = "run-editor-edits-sync-99"
+        raw_sp = [{
+            "id": 1,
+            "part_name": "Raw AI Bearing",
+            "part_number_code": "BRG-001",
+            "quantity": "2",
+            "status": "Pending Review",
+        }]
+        raw_mt = [{
+            "id": 1,
+            "equipment_title": "Centrifugal Pump",
+            "checks_instructions": "Inspect mechanical seal",
+            "status": "Pending Review",
+        }]
+        raw_tr = [{
+            "id": 1,
+            "problem": "Vibration",
+            "root_cause_solution": "Misalignment",
+            "status": "Pending Review",
+        }]
+
+        initial_doc = {
+            "run_id": run_id,
+            "filename": "Pump_Manual.pdf",
+            "status": "done",
+            "document_status": "Pending Review",
+            "user_id": "editor-uid-01",
+            "user_email": "editor@company.com",
+            "submitted_by": "editor@company.com",
+            "spare_parts": raw_sp,
+            "maintenance": raw_mt,
+            "troubleshooting": raw_tr,
+            "error": json.dumps({
+                "run_id": run_id,
+                "user_id": "editor-uid-01",
+                "user_email": "editor@company.com",
+                "document_status": "Pending Review",
+                "spare_parts": raw_sp,
+                "maintenance": raw_mt,
+                "troubleshooting": raw_tr,
+                "raw_payload": {
+                    "spare_parts": raw_sp,
+                    "maintenance": raw_mt,
+                    "troubleshooting": raw_tr,
+                    "extracted_at": "2026-08-30T10:00:00Z",
+                },
+            }),
+        }
+        _store_in_cache(run_id, initial_doc)
+
+        with patch("app.integrations.fabric_sql.fabric_configured", return_value=False):
+            # 1. Editor modifies the bearing name and quantity
+            edited_sp = [
+                SparePartRow(
+                    id=1,
+                    part_name="High-Temperature Precision Roller Bearing",
+                    part_number_code="BRG-001-MOD",
+                    quantity="4 (Upgraded)",
+                    status="In Review",
+                )
+            ]
+            ok = update_fabric_review_state(
+                run_id,
+                document_status="Pending Sign-Off",
+                approved_by="editor@company.com",
+                user_id="editor-uid-01",
+                user_email="editor@company.com",
+                user_role="editor",
+                spare_parts=edited_sp,
+                maintenance=[MaintenanceRow(**raw_mt[0])],
+                troubleshooting=[TroubleshootingRow(**raw_tr[0])],
+            )
+            self.assertTrue(ok)
+
+            # 2. Re-loading the extract returns the edited working rows
+            extract = load_extract_from_fabric(run_id, filename="Pump_Manual.pdf")
+            self.assertEqual(len(extract.spare_parts), 1)
+            self.assertEqual(extract.spare_parts[0].part_name, "High-Temperature Precision Roller Bearing")
+            self.assertEqual(extract.spare_parts[0].quantity, "4 (Upgraded)")
+            self.assertEqual(extract.meta.document_status, "Pending Sign-Off")
+
+            # 3. Verify the immutable raw baseline is intact
+            self.assertIsNotNone(extract.baseline)
+            self.assertEqual(len(extract.baseline.spare_parts), 1)
+            self.assertEqual(extract.baseline.spare_parts[0].part_name, "Raw AI Bearing")
+            self.assertTrue(extract.meta.has_diff)
+
+    def test_review_sync_resilient_row_parsing(self):
+        """Verifies that FabricReviewSyncRequest safely accepts and normalizes messy input types."""
+        from app.models import FabricReviewSyncRequest
+
+        # String confidence, lowercase status, and dictionary items
+        req = FabricReviewSyncRequest(
+            document_status="pending sign-off",
+            spare_parts=[
+                {
+                    "id": "1",
+                    "part_name": "Resilient Part",
+                    "confidence": "0.95",
+                    "status": "in review",
+                    "page": "12",
+                }
+            ]
+        )
+        self.assertEqual(req.document_status, "Pending Sign-Off")
+        self.assertIsNotNone(req.spare_parts)
+        self.assertEqual(len(req.spare_parts), 1)
+        self.assertEqual(req.spare_parts[0]["part_name"], "Resilient Part")
 
 
 

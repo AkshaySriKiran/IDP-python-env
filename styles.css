@@ -4953,16 +4953,14 @@ body.is-shared-viewer .auth-landing {
   display: none !important;
 }
 
-/* ---------------- Approver Pending Approvals Notification ---------------- */
+/* Notification bell — always visible for all logged-in users */
 .approvals-notif-wrap {
   position: relative;
   display: inline-flex;
   align-items: center;
 }
 
-.approvals-notif-wrap[hidden] {
-  display: none !important;
-}
+/* Legacy [hidden] override removed — no longer used */
 
 .approvals-bell-btn {
   position: relative;
