@@ -779,21 +779,33 @@ async def api_fabric_extract_review_sync(
     doc_meta_dict = payload.doc_metadata.model_dump() if payload.doc_metadata else None
     previous_status = _clean_status(meta.get("document_status"))
 
-    ok = await asyncio.to_thread(
-        update_fabric_review_state,
-        rid,
-        document_status=payload.document_status,
-        approved_by=payload.approved_by or user_email,
-        approved_at=payload.approved_at or datetime.now(timezone.utc).isoformat(),
-        rejection_notes=payload.rejection_notes,
-        user_id=user_id,
-        user_email=user_email,
-        user_role=user_role,
-        doc_metadata=doc_meta_dict,
-        spare_parts=payload.spare_parts,
-        maintenance=payload.maintenance,
-        troubleshooting=payload.troubleshooting,
+    from .integrations.fabric_cache import review_requeue_blocked_message, _row_content_hash
+
+    blocked = review_requeue_blocked_message(
+        _row_content_hash(meta),
+        new_status=payload.document_status,
     )
+    if blocked:
+        raise HTTPException(status_code=409, detail=blocked)
+
+    try:
+        ok = await asyncio.to_thread(
+            update_fabric_review_state,
+            rid,
+            document_status=payload.document_status,
+            approved_by=payload.approved_by or user_email,
+            approved_at=payload.approved_at or datetime.now(timezone.utc).isoformat(),
+            rejection_notes=payload.rejection_notes,
+            user_id=user_id,
+            user_email=user_email,
+            user_role=user_role,
+            doc_metadata=doc_meta_dict,
+            spare_parts=payload.spare_parts,
+            maintenance=payload.maintenance,
+            troubleshooting=payload.troubleshooting,
+        )
+    except ValueError as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
     if not ok:
         raise HTTPException(status_code=404, detail="Fabric extract run not found or sync failed.")
 

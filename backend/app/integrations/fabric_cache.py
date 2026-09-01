@@ -284,6 +284,42 @@ def find_user_run_by_content_hash(
     return None
 
 
+_REVIEW_QUEUE_STATUSES = {"Pending Review", "Pending Sign-Off", "In Review"}
+
+
+def resolve_approved_source(
+    content_hash: str,
+    cached: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Return the canonical globally approved source row for a PDF hash, if any."""
+    approved = find_approved_run_by_content_hash(content_hash)
+    if approved:
+        return approved
+    if cached and _clean_status(cached.get("document_status")) == "Approved":
+        return cached
+    return None
+
+
+def review_requeue_blocked_message(
+    content_hash: Optional[str],
+    *,
+    new_status: str,
+) -> Optional[str]:
+    """User-facing reason when a globally approved PDF is sent back to review."""
+    if _clean_status(new_status) not in _REVIEW_QUEUE_STATUSES:
+        return None
+    approved = find_approved_run_by_content_hash(content_hash or "")
+    if not approved:
+        return None
+    who = approved.get("approved_by") or "an approver"
+    when = approved.get("approved_at") or ""
+    when_s = f" on {when}" if when else ""
+    return (
+        f"This document was already signed off by {who}{when_s}. "
+        "It cannot be submitted for review again."
+    )
+
+
 def find_approved_run_by_content_hash(content_hash: str) -> Optional[dict[str, Any]]:
     """Return any globally approved extract run for a file hash (cross-user canonical)."""
     norm_hash = (content_hash or "").strip().lower()
@@ -1504,9 +1540,8 @@ def _isolate_cache_hit_for_new_user(result: ExtractResponse) -> bool:
     if not result or not result.meta:
         return False
     prior_status = _clean_status(getattr(result.meta, "document_status", None))
-    already = prior_status == "Approved"
-    prior_by = getattr(result.meta, "approved_by", None)
-    prior_at = getattr(result.meta, "approved_at", None)
+    if prior_status == "Approved":
+        return _apply_globally_approved_for_new_user(result)
 
     baseline = getattr(result, "baseline", None)
     if baseline is not None:
@@ -1530,21 +1565,10 @@ def _isolate_cache_hit_for_new_user(result: ExtractResponse) -> bool:
     result.meta.document_status = "Pending Review"
     result.meta.approved_by = None
     result.meta.approved_at = None
-    result.meta.already_approved = already
-    result.meta.prior_approved_by = str(prior_by) if already and prior_by else None
-    result.meta.prior_approved_at = str(prior_at) if already and prior_at else None
-    if already:
-        warnings = list(result.meta.warnings or [])
-        who = prior_by or "an approver"
-        when = f" on {prior_at}" if prior_at else ""
-        notice = (
-            f"This document was already signed off by {who}{when}. "
-            "A new pending copy was created for your workspace; the original AI baseline was preserved."
-        )
-        if notice not in warnings:
-            warnings.append(notice)
-        result.meta.warnings = warnings
-    return already
+    result.meta.already_approved = False
+    result.meta.prior_approved_by = None
+    result.meta.prior_approved_at = None
+    return False
 
 
 def save_extract_to_fabric(
@@ -1893,6 +1917,10 @@ def update_fabric_review_state(
 
     content_hash = _row_content_hash(log_row) or str(envelope.get("content_hash") or "").strip().lower() or None
 
+    blocked = review_requeue_blocked_message(content_hash, new_status=document_status)
+    if blocked:
+        raise ValueError(blocked)
+
     # Ensure raw_payload is preserved or seeded if missing from legacy records
     if "raw_payload" not in envelope or not envelope["raw_payload"]:
         legacy_sp = envelope.get("spare_parts") or []
@@ -2207,6 +2235,158 @@ def update_fabric_review_state(
     return True
 
 
+async def _notify_already_approved(
+    *,
+    user_email: Optional[str],
+    filename: str,
+    result: ExtractResponse,
+    run_id: str,
+) -> None:
+    if not user_email:
+        return
+    try:
+        from ..notifications import create_notification
+
+        title = filename
+        doc_md = getattr(result.meta, "doc_metadata", None)
+        if doc_md is not None and getattr(doc_md, "title", None):
+            title = doc_md.title
+        who = getattr(result.meta, "prior_approved_by", None) or getattr(result.meta, "approved_by", None) or "an approver"
+        when = getattr(result.meta, "prior_approved_at", None) or getattr(result.meta, "approved_at", None)
+        when_s = f" on {when}" if when else ""
+        create_notification(
+            recipient_email=user_email,
+            event_type="already_approved",
+            run_id=run_id,
+            title=str(title or filename),
+            actor_email=getattr(result.meta, "prior_approved_by", None) or getattr(result.meta, "approved_by", None),
+            body=(
+                f"This document was already signed off by {who}{when_s}. "
+                "Review is complete — no further action required."
+            ),
+        )
+    except Exception as nerr:
+        logger.debug("Already-approved notification skipped: %s", nerr)
+
+
+async def _serve_globally_approved_extract(
+    *,
+    approved_source: dict[str, Any],
+    file_bytes: bytes,
+    filename: str,
+    content_hash: str,
+    drive_item_id: Optional[str],
+    etag: Optional[str],
+    user_id: Optional[str],
+    user_email: Optional[str],
+    user_role: Optional[str],
+    duration_ms: Optional[int],
+    cached: Optional[dict[str, Any]],
+    on_progress: Optional[Callable[[str, float], None]],
+) -> Optional[ExtractResponse]:
+    """Load and persist a read-only Approved view for a globally signed-off PDF."""
+    source_run_id = str(approved_source["run_id"])
+    existing_user_run = None
+    if user_id or user_email:
+        existing_user_run = await asyncio.to_thread(
+            find_user_run_by_content_hash,
+            content_hash,
+            user_id=user_id,
+            user_email=user_email,
+        )
+
+    reuse_run_id = None
+    if existing_user_run and existing_user_run.get("run_id"):
+        reuse_run_id = str(existing_user_run["run_id"])
+        if on_progress:
+            on_progress("Loading previously signed-off document…", 0.25)
+        result = await asyncio.to_thread(
+            load_extract_from_fabric,
+            reuse_run_id,
+            filename=filename,
+            overall_score=(
+                float(existing_user_run["overall_score"])
+                if existing_user_run.get("overall_score") is not None
+                else None
+            ),
+            cached_record=existing_user_run,
+        )
+        if result:
+            result = await asyncio.to_thread(
+                resolve_global_approved_cache_view,
+                result,
+                existing_user_run,
+                keep_run_id=reuse_run_id,
+            )
+    else:
+        if on_progress:
+            on_progress("This document was already signed off — loading approved record…", 0.2)
+        result = await asyncio.to_thread(
+            load_extract_from_fabric,
+            source_run_id,
+            filename=filename,
+            overall_score=(
+                float(approved_source["overall_score"])
+                if approved_source.get("overall_score") is not None
+                else None
+            ),
+            cached_record=approved_source,
+        )
+        if result:
+            _apply_globally_approved_for_new_user(result)
+
+    if not result:
+        return None
+
+    if hasattr(result, "meta") and result.meta:
+        result.meta.engine = "fabric-cache"
+
+    if on_progress:
+        on_progress("Logging approved document to your workspace…", 0.9)
+    try:
+        new_run_id = await asyncio.to_thread(
+            save_extract_to_fabric,
+            file_bytes=file_bytes,
+            filename=filename,
+            result=result,
+            content_hash=content_hash,
+            drive_item_id=drive_item_id or (cached or {}).get("drive_item_id") or (existing_user_run or {}).get("drive_item_id"),
+            etag=etag or (cached or {}).get("etag") or (existing_user_run or {}).get("etag"),
+            user_id=user_id,
+            user_email=user_email,
+            user_role=user_role,
+            duration_ms=duration_ms or 0,
+        )
+        if new_run_id:
+            result.meta.run_id = new_run_id
+        elif reuse_run_id:
+            result.meta.run_id = reuse_run_id
+        else:
+            result.meta.run_id = source_run_id
+        if new_run_id:
+            await asyncio.to_thread(
+                supersede_duplicate_runs,
+                new_run_id,
+                content_hash=content_hash,
+                user_id=user_id,
+                user_email=user_email,
+            )
+        await _notify_already_approved(
+            user_email=user_email,
+            filename=filename,
+            result=result,
+            run_id=str(result.meta.run_id),
+        )
+    except Exception as save_err:
+        logger.warning("Failed to persist globally approved extract: %s", save_err)
+        if reuse_run_id and hasattr(result, "meta") and result.meta:
+            result.meta.run_id = reuse_run_id
+
+    if on_progress:
+        on_progress("Document already approved — no review required", 1.0)
+    return result
+
+
 async def extract_with_fabric_cache(
     file_bytes: bytes,
     filename: str,
@@ -2232,12 +2412,30 @@ async def extract_with_fabric_cache(
             drive_item_id=drive_item_id,
             filename=filename,
         )
-        if cached and cached.get("run_id"):
-            approved_global = await asyncio.to_thread(
-                find_approved_run_by_content_hash,
-                content_hash,
+        approved_source = await asyncio.to_thread(
+            resolve_approved_source,
+            content_hash,
+            cached,
+        )
+        if approved_source and approved_source.get("run_id"):
+            approved_result = await _serve_globally_approved_extract(
+                approved_source=approved_source,
+                file_bytes=file_bytes,
+                filename=filename,
+                content_hash=content_hash,
+                drive_item_id=drive_item_id,
+                etag=etag,
+                user_id=user_id,
+                user_email=user_email,
+                user_role=user_role,
+                duration_ms=duration_ms,
+                cached=cached,
+                on_progress=on_progress,
             )
+            if approved_result:
+                return approved_result
 
+        if cached and cached.get("run_id"):
             # Reuse the current user's existing history row for this file (no duplicate insert).
             existing_user_run = None
             if user_id or user_email:
@@ -2248,69 +2446,29 @@ async def extract_with_fabric_cache(
                     user_email=user_email,
                 )
             if existing_user_run and existing_user_run.get("run_id"):
-                user_status = _clean_status(existing_user_run.get("document_status"))
-                # Pending duplicates are upgraded when a globally approved copy exists.
-                if user_status == "Approved" or not approved_global:
-                    reuse_run_id = str(existing_user_run["run_id"])
+                reuse_run_id = str(existing_user_run["run_id"])
+                if on_progress:
+                    on_progress("Reusing your existing document record…", 0.25)
+                result = await asyncio.to_thread(
+                    load_extract_from_fabric,
+                    reuse_run_id,
+                    filename=filename,
+                    overall_score=(
+                        float(existing_user_run["overall_score"])
+                        if existing_user_run.get("overall_score") is not None
+                        else None
+                    ),
+                    cached_record=existing_user_run,
+                )
+                if result:
+                    if hasattr(result, "meta") and result.meta:
+                        result.meta.run_id = reuse_run_id
+                        result.meta.engine = "fabric-cache"
                     if on_progress:
-                        on_progress("Reusing your existing document record…", 0.25)
-                    result = await asyncio.to_thread(
-                        load_extract_from_fabric,
-                        reuse_run_id,
-                        filename=filename,
-                        overall_score=(
-                            float(existing_user_run["overall_score"])
-                            if existing_user_run.get("overall_score") is not None
-                            else None
-                        ),
-                        cached_record=existing_user_run,
-                    )
-                    if result:
-                        if approved_global and user_status != "Approved":
-                            result = await asyncio.to_thread(
-                                resolve_global_approved_cache_view,
-                                result,
-                                existing_user_run,
-                                keep_run_id=reuse_run_id,
-                            )
-                            try:
-                                new_run_id = await asyncio.to_thread(
-                                    save_extract_to_fabric,
-                                    file_bytes=file_bytes,
-                                    filename=filename,
-                                    result=result,
-                                    content_hash=content_hash,
-                                    drive_item_id=drive_item_id or existing_user_run.get("drive_item_id"),
-                                    etag=etag or existing_user_run.get("etag"),
-                                    user_id=user_id,
-                                    user_email=user_email,
-                                    user_role=user_role,
-                                    duration_ms=duration_ms or 0,
-                                )
-                                if new_run_id:
-                                    result.meta.run_id = new_run_id
-                                    await asyncio.to_thread(
-                                        supersede_duplicate_runs,
-                                        new_run_id,
-                                        content_hash=content_hash,
-                                        user_id=user_id,
-                                        user_email=user_email,
-                                    )
-                            except Exception as save_err:
-                                logger.warning(
-                                    "Failed to persist upgraded approved cache hit: %s", save_err
-                                )
-                                result.meta.run_id = reuse_run_id
-                        elif hasattr(result, "meta") and result.meta:
-                            result.meta.run_id = reuse_run_id
-                        if hasattr(result, "meta") and result.meta:
-                            result.meta.engine = "fabric-cache"
-                        if on_progress:
-                            on_progress("Loaded existing document record (no duplicate created)", 1.0)
-                        return result
+                        on_progress("Loaded existing document record (no duplicate created)", 1.0)
+                    return result
 
-            source = approved_global if approved_global else cached
-            source_run_id = str(source["run_id"])
+            source_run_id = str(cached["run_id"])
             if on_progress:
                 on_progress("Loading extract from cache (deduplicated)…", 0.2)
             result = await asyncio.to_thread(
@@ -2318,21 +2476,18 @@ async def extract_with_fabric_cache(
                 source_run_id,
                 filename=filename,
                 overall_score=(
-                    float(source["overall_score"])
-                    if source.get("overall_score") is not None
+                    float(cached["overall_score"])
+                    if cached.get("overall_score") is not None
                     else None
                 ),
-                cached_record=source,
+                cached_record=cached,
             )
             if result:
                 if hasattr(result, "meta") and result.meta:
                     result.meta.run_id = source_run_id
                     result.meta.engine = "fabric-cache"
 
-                if approved_global:
-                    already_signed = _apply_globally_approved_for_new_user(result)
-                else:
-                    already_signed = _isolate_cache_hit_for_new_user(result)
+                _isolate_cache_hit_for_new_user(result)
 
                 # Log extraction execution event in Fabric Lakehouse & user history
                 if on_progress:
@@ -2353,36 +2508,6 @@ async def extract_with_fabric_cache(
                     )
                     if hasattr(result, "meta") and result.meta and new_run_id:
                         result.meta.run_id = new_run_id
-                    if approved_global and new_run_id:
-                        await asyncio.to_thread(
-                            supersede_duplicate_runs,
-                            new_run_id,
-                            content_hash=content_hash,
-                            user_id=user_id,
-                            user_email=user_email,
-                        )
-                    if already_signed and user_email:
-                        try:
-                            from ..notifications import create_notification
-                            title = filename
-                            doc_md = getattr(result.meta, "doc_metadata", None)
-                            if doc_md is not None and getattr(doc_md, "title", None):
-                                title = doc_md.title
-                            body = (
-                                "This document was previously signed off and is shown as Approved in your workspace."
-                                if approved_global
-                                else "This document was previously signed off. A new pending copy was created for your workspace; the original AI baseline was preserved."
-                            )
-                            create_notification(
-                                recipient_email=user_email,
-                                event_type="already_approved",
-                                run_id=str(getattr(result.meta, "run_id", None) or source_run_id),
-                                title=str(title or filename),
-                                actor_email=getattr(result.meta, "prior_approved_by", None),
-                                body=body,
-                            )
-                        except Exception as nerr:
-                            logger.debug("Cache-hit already-approved notification skipped: %s", nerr)
                 except Exception as save_err:
                     logger.warning("Failed to log deduplicated extract to Fabric: %s", save_err)
 
@@ -2393,6 +2518,28 @@ async def extract_with_fabric_cache(
         logger.warning("Repository cache lookup error: %s", err)
 
     result = await extract_fn(file_bytes, filename, options, on_progress=on_progress)
+
+    approved_after_extract = await asyncio.to_thread(
+        find_approved_run_by_content_hash,
+        content_hash,
+    )
+    if approved_after_extract and approved_after_extract.get("run_id"):
+        approved_result = await _serve_globally_approved_extract(
+            approved_source=approved_after_extract,
+            file_bytes=file_bytes,
+            filename=filename,
+            content_hash=content_hash,
+            drive_item_id=drive_item_id,
+            etag=etag,
+            user_id=user_id,
+            user_email=user_email,
+            user_role=user_role,
+            duration_ms=duration_ms,
+            cached=None,
+            on_progress=on_progress,
+        )
+        if approved_result:
+            return approved_result
 
     if (not drive_item_id or drive_item_id == "LOCAL_UPLOAD") and graph_sharepoint.sharepoint_configured():
         try:

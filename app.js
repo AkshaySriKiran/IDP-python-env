@@ -1326,6 +1326,20 @@ function initProgressCardDrag() {
   handle.addEventListener("pointercancel", onPointerUp);
 }
 
+function isDocumentAlreadyApproved() {
+  return Boolean(
+    (lastExtractMeta && lastExtractMeta.already_approved) ||
+    activeDocumentStatus === "Approved"
+  );
+}
+
+function alreadyApprovedNotice(meta) {
+  const who = (meta && (meta.prior_approved_by || meta.approved_by)) || activeApprovedBy || "an approver";
+  const whenRaw = (meta && (meta.prior_approved_at || meta.approved_at)) || activeApprovedAt;
+  const when = whenRaw ? ` on ${whenRaw}` : "";
+  return `This document was already signed off by ${who}${when}. Review is complete — no further action required.`;
+}
+
 function applyApiExtractResult(result, file) {
   try {
     const meta = (result && result.meta) || {};
@@ -1408,13 +1422,10 @@ function applyApiExtractResult(result, file) {
 
     (meta.warnings || []).forEach(w => appendChatSystemMessage(`⚠️ ${w}`));
 
-    if (meta.already_approved) {
-      const who = meta.prior_approved_by || activeApprovedBy || "an approver";
-      const when = meta.prior_approved_at || activeApprovedAt ? ` on ${meta.prior_approved_at || activeApprovedAt}` : "";
-      const prompt = activeDocumentStatus === "Approved"
-        ? `This document was already signed off by ${who}${when}. Review is complete — no further action required.`
-        : `This document was already signed off by ${who}${when}. A new pending copy was created for your workspace. The original AI extraction is preserved as the audit baseline.`;
+    if (meta.already_approved || activeDocumentStatus === "Approved") {
+      const prompt = alreadyApprovedNotice(meta);
       try { window.alert(prompt); } catch (e) {}
+      appendChatSystemMessage(`⚠️ ${prompt}`);
     }
 
     if (progressFill) progressFill.style.width = "100%";
@@ -1424,6 +1435,7 @@ function applyApiExtractResult(result, file) {
     lastSourceDocName = resolvedDocName;
     setActiveDocBadge(resolvedDocName);
     updateDocMetadataBadge();
+    if (typeof updateRoleActionButtons === "function") updateRoleActionButtons();
     safeCreateIcons();
 
     preferTabWithResults();
@@ -4621,7 +4633,11 @@ async function syncReviewStateToFabric() {
       if (typeof updateDiffToolbarButtons === "function") updateDiffToolbarButtons();
     } else {
       const errJson = await resp.json().catch(() => ({}));
+      const detail = errJson.detail || errJson.message || `HTTP ${resp.status}`;
       console.warn("Fabric review sync warning:", resp.status, errJson);
+      if (resp.status === 409) {
+        throw new Error(detail);
+      }
     }
     return resp;
   } catch (e) {
@@ -4880,7 +4896,12 @@ async function submitDocumentForReview() {
     alert("No records in the workspace to submit for review.");
     return;
   }
+  if (isDocumentAlreadyApproved()) {
+    alert(alreadyApprovedNotice(lastExtractMeta));
+    return;
+  }
 
+  const priorStatus = activeDocumentStatus;
   activeDocumentStatus = "Pending Sign-Off";
   updateDocMetadataBadge();
   renderGridPreservingScroll();
@@ -4906,6 +4927,9 @@ async function submitDocumentForReview() {
       }, 1500);
     }
   } catch (err) {
+    activeDocumentStatus = priorStatus;
+    updateDocMetadataBadge();
+    renderGridPreservingScroll();
     if (signoffBtn) {
       signoffBtn.disabled = false;
       updateRoleActionButtons();
@@ -4932,12 +4956,19 @@ function updateRoleActionButtons() {
 
   if (signoffBtn) {
     signoffBtn.style.display = totalRecords > 0 ? "inline-flex" : "none";
+    const alreadyApproved = isDocumentAlreadyApproved();
     if (allowApprove) {
       signoffBtn.title = "Sync review status and partial sign-off to Microsoft Fabric";
       signoffBtn.innerHTML = `<i data-lucide="check"></i><span>Sign-Off</span>`;
+      signoffBtn.disabled = false;
+    } else if (alreadyApproved) {
+      signoffBtn.title = "This document was already signed off and cannot be submitted again";
+      signoffBtn.innerHTML = `<i data-lucide="check-check"></i><span>Already Approved</span>`;
+      signoffBtn.disabled = true;
     } else {
       signoffBtn.title = "Submit workspace changes for approver review";
       signoffBtn.innerHTML = `<i data-lucide="send"></i><span>Submit for Review</span>`;
+      signoffBtn.disabled = false;
     }
   }
   if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();

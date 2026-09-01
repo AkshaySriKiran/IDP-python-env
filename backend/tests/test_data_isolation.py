@@ -542,6 +542,36 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
             self.assertTrue(res.meta.already_approved)
             self.assertTrue(mock_notif.called)
 
+    def test_review_sync_blocks_requeue_of_globally_approved_document(self):
+        extract_meta = {
+            "run_id": "run-dup-approved",
+            "filename": "pump.pdf",
+            "content_hash": "abc123hash",
+            "user_id": self.editor_user.id,
+            "user_email": self.editor_user.email,
+            "document_status": "Approved",
+            "assigned_approver": self.approver_user.email,
+            "submitted_by": self.editor_user.email,
+        }
+        approved_global = {
+            "run_id": "run-canonical-approved",
+            "content_hash": "abc123hash",
+            "document_status": "Approved",
+            "approved_by": "orig.approver@corp.com",
+            "approved_at": "2026-08-20T12:00:00Z",
+        }
+        with patch("app.main.get_done_run", return_value=extract_meta), \
+             patch("app.integrations.fabric_cache.find_approved_run_by_content_hash", return_value=approved_global), \
+             patch("app.main.update_fabric_review_state", return_value=True) as mock_upd:
+            resp = self.client.post(
+                "/api/fabric/extracts/run-dup-approved/review-sync",
+                json={"document_status": "Pending Sign-Off"},
+                headers={"Authorization": f"Bearer {self.editor_token}"},
+            )
+            self.assertEqual(resp.status_code, 409)
+            self.assertIn("already signed off", resp.json()["detail"])
+            mock_upd.assert_not_called()
+
     def test_share_requires_document_ownership(self):
         extract_meta = {
             "run_id": "run-alice-share",

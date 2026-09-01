@@ -1686,6 +1686,22 @@ class TestEnterpriseEnhancements(unittest.TestCase):
         self.assertEqual(len(req.spare_parts), 1)
         self.assertEqual(req.spare_parts[0]["part_name"], "Resilient Part")
 
+    def test_review_requeue_blocked_for_globally_approved_hash(self):
+        from app.integrations.fabric_cache import review_requeue_blocked_message
+
+        approved = {
+            "run_id": "run-approved",
+            "content_hash": "hash-1",
+            "document_status": "Approved",
+            "approved_by": "admin@corp.com",
+            "approved_at": "2026-08-20T12:00:00Z",
+        }
+        with patch("app.integrations.fabric_cache.find_approved_run_by_content_hash", return_value=approved):
+            msg = review_requeue_blocked_message("hash-1", new_status="Pending Sign-Off")
+            self.assertIsNotNone(msg)
+            self.assertIn("admin@corp.com", msg)
+            self.assertIsNone(review_requeue_blocked_message("hash-1", new_status="Approved"))
+
 
 
 
