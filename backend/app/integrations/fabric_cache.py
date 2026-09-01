@@ -511,10 +511,6 @@ def find_done_run(
     return None
 
 
-def find_done_run_by_hash(content_hash: str) -> Optional[dict[str, Any]]:
-    return find_done_run(content_hash=content_hash)
-
-
 def _norm_email(val: Any) -> str:
     return str(val or "").strip().lower()
 

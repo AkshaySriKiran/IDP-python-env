@@ -5,7 +5,6 @@ import uuid
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-import jwt
 
 from ..config import get_jwt_secret, is_auth_required
 from ..security import decode_access_token
@@ -20,15 +19,10 @@ def _user_from_token(token: str) -> UserPublic:
     if not token_str:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    payload: dict[str, Any] = {}
     try:
         payload = decode_access_token(token_str, get_jwt_secret())
-    except Exception:
-        # Fallback for tokens signed with previous secret or Microsoft SSO JWTs
-        try:
-            payload = jwt.decode(token_str, options={"verify_signature": False})
-        except Exception as err:
-            raise HTTPException(status_code=401, detail="Invalid or expired authentication token") from err
+    except Exception as err:
+        raise HTTPException(status_code=401, detail="Invalid or expired authentication token") from err
 
     user_id = str(payload.get("sub") or payload.get("oid") or payload.get("id") or "").strip()
     email = str(

@@ -29,6 +29,16 @@ def is_auth_required() -> bool:
     return _env("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
 
 
+def api_docs_enabled() -> bool:
+    """Expose Swagger/OpenAPI only in local/dev; production ECS sets AUTH_REQUIRED=true."""
+    explicit = _env("API_DOCS_ENABLED", "").lower()
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    return not is_auth_required()
+
+
 def get_cors_origins() -> list[str]:
     raw = _env("CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000")
     return [orig.strip().strip('"').strip("'") for orig in raw.split(",") if orig.strip()]

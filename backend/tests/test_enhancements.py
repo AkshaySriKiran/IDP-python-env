@@ -897,11 +897,35 @@ class TestEnterpriseEnhancements(unittest.TestCase):
                  "AZURE_CLIENT_SECRET": "testsecret",
                  "CORS_ORIGINS": "http://localhost:8000,https://d11bl7hg497hj.cloudfront.net"
              }):
-            resp = client.get("/api/auth/sso/callback?code=mock-auth-code", follow_redirects=False)
+            from app.auth.routes import _get_sso_url
+            _, oauth_state = _get_sso_url()
+            resp = client.get(
+                f"/api/auth/sso/callback?code=mock-auth-code&state={oauth_state}",
+                follow_redirects=False,
+            )
             assert resp.status_code == 307
             loc = resp.headers["location"]
             assert loc.startswith("https://d11bl7hg497hj.cloudfront.net/index.html#sso_token=")
             assert "engineer%40company.com" in loc
+
+    def test_sso_callback_rejects_missing_or_invalid_state(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import os
+
+        client = TestClient(app)
+        with patch("app.auth.routes._sso_configured", return_value=True), \
+             patch.dict(os.environ, {
+                 "AZURE_TENANT_ID": "196e20ca-f848-4dbc-b812-0125cda86494",
+                 "AZURE_CLIENT_ID": "8d75ea52-c177-4dba-8bd0-19808e8f2220",
+             }):
+            missing = client.get("/api/auth/sso/callback?code=mock-auth-code", follow_redirects=False)
+            assert missing.status_code == 400
+            bad = client.get(
+                "/api/auth/sso/callback?code=mock-auth-code&state=not-a-valid-nonce",
+                follow_redirects=False,
+            )
+            assert bad.status_code == 400
 
     def test_sso_callback_unauthorized_user_access_denied(self):
         from fastapi.testclient import TestClient
@@ -933,7 +957,12 @@ class TestEnterpriseEnhancements(unittest.TestCase):
                  "AZURE_CLIENT_SECRET": "testsecret",
                  "CORS_ORIGINS": "http://localhost:8000,https://d11bl7hg497hj.cloudfront.net"
              }):
-            resp = client.get("/api/auth/sso/callback?code=mock-auth-code", follow_redirects=False)
+            from app.auth.routes import _get_sso_url
+            _, oauth_state = _get_sso_url()
+            resp = client.get(
+                f"/api/auth/sso/callback?code=mock-auth-code&state={oauth_state}",
+                follow_redirects=False,
+            )
             assert resp.status_code == 307
             loc = resp.headers["location"]
             assert "auth_error=access_denied" in loc
@@ -1701,6 +1730,31 @@ class TestEnterpriseEnhancements(unittest.TestCase):
             self.assertIsNotNone(msg)
             self.assertIn("admin@corp.com", msg)
             self.assertIsNone(review_requeue_blocked_message("hash-1", new_status="Approved"))
+
+    def test_unsigned_jwt_is_rejected(self):
+        import jwt
+        from app.auth.deps import _user_from_token
+        from fastapi import HTTPException
+
+        forged = jwt.encode(
+            {"sub": "evil", "email": "attacker@corp.com", "role": "admin"},
+            "wrong-secret",
+            algorithm="HS256",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            _user_from_token(forged)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_api_docs_disabled_when_auth_required(self):
+        from app.config import api_docs_enabled
+        import os
+
+        with patch.dict(os.environ, {"AUTH_REQUIRED": "true", "API_DOCS_ENABLED": ""}):
+            self.assertFalse(api_docs_enabled())
+        with patch.dict(os.environ, {"AUTH_REQUIRED": "false", "API_DOCS_ENABLED": ""}):
+            self.assertTrue(api_docs_enabled())
+        with patch.dict(os.environ, {"AUTH_REQUIRED": "true", "API_DOCS_ENABLED": "true"}):
+            self.assertTrue(api_docs_enabled())
 
 
 

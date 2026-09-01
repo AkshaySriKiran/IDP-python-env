@@ -18,10 +18,11 @@ from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Re
 from fastapi.middleware.cors import CORSMiddleware
 
 from .auth import auth_router, require_user_if_auth
-from .auth.deps import require_admin, require_approver, require_editor
+from .auth.deps import require_admin
 from .auth.schemas import UserPublic
 from .auth.store import ensure_seed_admin
 from .config import (
+    api_docs_enabled,
     get_cors_origins,
     get_default_gemini_key,
     get_default_gemini_model,
@@ -77,10 +78,14 @@ _PENDING_STATUSES = {"Pending Sign-Off", "Pending Review", "In Review", "Needs R
 API_VERSION = "1.0.0"
 JOB_TTL_SECONDS = 6 * 60 * 60
 
+_docs_enabled = api_docs_enabled()
 app = FastAPI(
     title="OmniParse Maintenance IDP API",
     description="High-throughput document extraction backend for maintenance protocols and spare parts catalogues.",
     version=API_VERSION,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 # Hardened CORS policy: explicit origins, methods, and allowed headers

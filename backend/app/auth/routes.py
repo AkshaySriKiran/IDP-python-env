@@ -167,8 +167,10 @@ async def sso_callback(
     if not _sso_configured():
         raise HTTPException(status_code=503, detail="SSO authentication is not configured.")
 
-    if state and state in _oauth_states:
-        _oauth_states.discard(state)
+    state_clean = str(state or "").strip()
+    if not state_clean or state_clean not in _oauth_states:
+        raise HTTPException(status_code=400, detail="Invalid or missing OAuth state parameter.")
+    _oauth_states.discard(state_clean)
 
     base = _resolve_base_url(request=request)
     tenant = _clean_env("AZURE_TENANT_ID")
