@@ -323,6 +323,10 @@ Resources:
               Value: !Sub "https://${CloudFrontDistribution.DomainName}"
             - Name: SSO_REDIRECT_URI
               Value: !Sub "https://${CloudFrontDistribution.DomainName}/api/auth/sso/callback"
+            - Name: EMAIL_ENABLED
+              Value: "true"
+            - Name: EMAIL_FROM
+              Value: "Vira.IDP@bqubeglobal.com"
           Secrets:
             - Name: GEMINI_API_KEY
               ValueFrom: !Sub "${AppSecret}:GEMINI_API_KEY::"

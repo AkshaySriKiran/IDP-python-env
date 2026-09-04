@@ -105,3 +105,11 @@ def get_allowed_ollama_hosts() -> list[str]:
 
 def get_ui_base_url() -> str:
     return _env("UI_BASE_URL", "http://localhost:8000").rstrip("/")
+
+
+def is_email_enabled() -> bool:
+    return _env("EMAIL_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def get_email_from() -> str:
+    return _env("EMAIL_FROM", "Vira.IDP@bqubeglobal.com").strip()

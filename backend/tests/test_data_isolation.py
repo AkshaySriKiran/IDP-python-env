@@ -763,6 +763,46 @@ class TestDataIsolationAndPrivacyScoping(unittest.TestCase):
                 body = mock_upsert.call_args[1].get("body") or ""
                 self.assertIn("14 approved", body)
 
+    def test_upsert_coalesces_review_outcomes_without_repeat_email(self):
+        """Row-by-row sign-off should refresh one unread notif and email only on create."""
+        from app import notifications as nmod
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(nmod, "NOTIF_FILE", Path(td) / "notifications.json"), \
+                 patch.object(nmod, "_fabric_ready", return_value=False), \
+                 patch.object(nmod, "_try_email") as mock_email:
+                first = nmod.upsert_document_notification(
+                    recipient_email=self.editor_user.email,
+                    event_type="signed_off",
+                    run_id="run-coalesce",
+                    title="Doc",
+                    actor_email=self.approver_user.email,
+                    body="1 approved, 0 rejected, 2 pending",
+                    email_context={"final_status": "Approved"},
+                )
+                self.assertIsNotNone(first)
+                self.assertEqual(mock_email.call_count, 1)
+
+                second = nmod.upsert_document_notification(
+                    recipient_email=self.editor_user.email,
+                    event_type="revision_requested",
+                    run_id="run-coalesce",
+                    title="Doc",
+                    actor_email=self.approver_user.email,
+                    body="1 approved, 1 rejected, 1 pending",
+                    email_context={"final_status": "Needs Revision", "comments": "fix row"},
+                )
+                self.assertEqual(second["id"], first["id"])
+                self.assertEqual(second["event_type"], "revision_requested")
+                self.assertEqual(mock_email.call_count, 1)
+
+                items = nmod.list_for_user(self.editor_user.email)
+                unread = [i for i in items if i.get("run_id") == "run-coalesce" and not i.get("read")]
+                self.assertEqual(len(unread), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

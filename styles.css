@@ -1691,6 +1691,12 @@ html[data-theme="light"] .grid-footer {
 }
 
 /* Loading Spin Utility */
+.spin {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+  vertical-align: middle;
+}
+
 .spin-loading {
   animation: spin 1s infinite linear;
 }
@@ -5437,9 +5443,20 @@ html[data-theme="light"] .diff-tab-btn.active {
   border-bottom-color: #0284c7 !important;
 }
 
+.diff-modal-panel .page-context-header,
+.diff-modal-summary-bar,
+.diff-tabs-nav,
+.diff-modal-footer {
+  flex-shrink: 0;
+}
+
 .diff-modal-body {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   padding: 1.25rem 1.5rem;
   display: flex;
   flex-direction: column;

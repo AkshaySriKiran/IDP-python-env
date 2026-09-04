@@ -2260,6 +2260,12 @@ async def _notify_already_approved(
                 f"This document was already signed off by {who}{when_s}. "
                 "Review is complete — no further action required."
             ),
+            email_context={
+                "filename": filename,
+                "document_title": str(title or filename),
+                "prior_approved_by": who,
+                "prior_approved_at": str(when or ""),
+            },
         )
     except Exception as nerr:
         logger.debug("Already-approved notification skipped: %s", nerr)

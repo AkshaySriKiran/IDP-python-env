@@ -828,7 +828,7 @@ async def api_fabric_extract_review_sync(
         pass
 
     _fanout_review_notifications(
-        meta,
+        {**meta, "rejection_notes": payload.rejection_notes, "filename": meta.get("filename")},
         payload.document_status,
         user_email,
         rid,
@@ -919,6 +919,7 @@ def _fanout_review_notifications(
                     pending += 1
             return approved, rejected, pending
 
+        terminal = {"Approved", "Rejected", "Needs Revision"}
         if status == "Pending Sign-Off" and prev != "Pending Sign-Off":
             if assigned and assigned != actor:
                 upsert_document_notification(
@@ -928,8 +929,17 @@ def _fanout_review_notifications(
                     title=title,
                     actor_email=actor or None,
                     body=f"{actor or 'An editor'} submitted “{title}” for your review.",
+                    email_context={
+                        "filename": str(meta.get("filename") or ""),
+                        "document_title": title,
+                        "actor_email": actor,
+                        "submitted_at": datetime.now(timezone.utc).isoformat(),
+                    },
                 )
-        elif status in {"Approved", "Rejected", "Needs Revision"} and prev not in {status}:
+        elif status in terminal and prev != status:
+            # Only notify when entering / changing a terminal document outcome.
+            # Row-level approve syncs that keep the same terminal status are no-ops
+            # above (status == prev). Upsert coalesces signed_off + revision_requested.
             event = "revision_requested" if status == "Needs Revision" else "signed_off"
             if owner and owner != actor:
                 verb = {
@@ -947,6 +957,15 @@ def _fanout_review_notifications(
                     title=title,
                     actor_email=actor or None,
                     body=f"{actor or 'A reviewer'} {verb} “{title}” ({summary}).",
+                    email_context={
+                        "filename": str(meta.get("filename") or ""),
+                        "document_title": title,
+                        "final_status": status,
+                        "record_summary": summary,
+                        "comments": str(meta.get("rejection_notes") or "").strip(),
+                        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                        "actor_email": actor,
+                    },
                 )
     except Exception as err:
         logger.debug("Review notification fan-out skipped: %s", err)

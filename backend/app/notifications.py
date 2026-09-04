@@ -75,6 +75,18 @@ def _row_to_item(r: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Review-outcome events share one unread slot per document so row-by-row
+# sign-off does not flood the editor with one notification per action.
+_REVIEW_OUTCOME_EVENTS = frozenset({"signed_off", "revision_requested"})
+
+
+def _coalesce_event_types(event_type: str) -> tuple[str, ...]:
+    et = str(event_type or "info")
+    if et in _REVIEW_OUTCOME_EVENTS:
+        return tuple(_REVIEW_OUTCOME_EVENTS)
+    return (et,)
+
+
 def upsert_document_notification(
     *,
     recipient_email: str,
@@ -83,27 +95,39 @@ def upsert_document_notification(
     title: str,
     actor_email: Optional[str] = None,
     body: Optional[str] = None,
+    email_context: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    """Create or refresh a single unread notification per document + event type."""
+    """Create or refresh a single unread notification per document + event family.
+
+    For review outcomes (signed_off / revision_requested), refreshes the existing
+    unread item for that run instead of inserting another. Email is sent only when
+    a new notification row is created — not on refresh — to avoid duplicate mails.
+    """
     email = str(recipient_email or "").strip().lower()
     rid = (run_id or "").strip()
     et = str(event_type or "info")
     if not email or not rid:
         return None
+    coalesce = _coalesce_event_types(et)
 
     if _fabric_ready():
         try:
             conn = _with_fabric_conn()
             cur = conn.cursor()
             try:
+                placeholders = ",".join("?" for _ in coalesce)
                 cur.execute(
-                    """
+                    f"""
                     SELECT TOP 1 notif_id FROM Tbl_PM_Notifications
-                    WHERE LOWER(recipient_email) = ? AND run_id = ? AND event_type = ?
-                      AND LOWER(is_read) IN ('0', 'false', 'no', 'n')
+                    WHERE LOWER(recipient_email) = ? AND run_id = ?
+                      AND event_type IN ({placeholders})
+                      AND (
+                        LOWER(CAST(is_read AS VARCHAR(16))) IN ('0', 'false', 'no', 'n', '')
+                        OR is_read IS NULL
+                      )
                     ORDER BY created_at DESC
                     """,
-                    (email, rid, et),
+                    (email, rid, *coalesce),
                 )
                 existing = cur.fetchone()
                 url = deep_link_for_run(rid)
@@ -116,12 +140,31 @@ def upsert_document_notification(
                     cur.execute(
                         """
                         UPDATE Tbl_PM_Notifications
-                        SET title = ?, body = ?, actor_email = ?, url = ?, created_at = ?
+                        SET event_type = ?, title = ?, body = ?, actor_email = ?, url = ?, created_at = ?
                         WHERE notif_id = ?
                         """,
-                        (title_s, body_s, actor, url, now, nid),
+                        (et, title_s, body_s, actor, url, now, nid),
                     )
+                    # Mark any sibling unread outcomes for this run as read so the
+                    # bell shows a single consolidated item.
+                    if len(coalesce) > 1:
+                        sib_ph = ",".join("?" for _ in coalesce)
+                        cur.execute(
+                            f"""
+                            UPDATE Tbl_PM_Notifications
+                            SET is_read = '1'
+                            WHERE LOWER(recipient_email) = ? AND run_id = ?
+                              AND event_type IN ({sib_ph})
+                              AND notif_id <> ?
+                              AND (
+                                LOWER(CAST(is_read AS VARCHAR(16))) IN ('0', 'false', 'no', 'n', '')
+                                OR is_read IS NULL
+                              )
+                            """,
+                            (email, rid, *coalesce, nid),
+                        )
                     conn.commit()
+                    # Refresh only — do not re-email on every row-level sign-off sync.
                     return {
                         "id": nid,
                         "recipient_email": email,
@@ -142,20 +185,27 @@ def upsert_document_notification(
 
     with _lock:
         data = _load()
+        matched = None
         for i in data.get("items") or []:
             if (
                 str(i.get("recipient_email") or "").lower() == email
                 and str(i.get("run_id") or "") == rid
-                and str(i.get("event_type") or "") == et
+                and str(i.get("event_type") or "") in coalesce
                 and not i.get("read")
             ):
-                i["title"] = str(title or "Document").strip() or "Document"
-                i["body"] = str(body or "").strip()
-                i["actor_email"] = str(actor_email or "").strip().lower() or None
-                i["url"] = deep_link_for_run(rid)
-                i["created_at"] = _now()
-                _save(data)
-                return dict(i)
+                if matched is None:
+                    matched = i
+                else:
+                    i["read"] = True
+        if matched is not None:
+            matched["event_type"] = et
+            matched["title"] = str(title or "Document").strip() or "Document"
+            matched["body"] = str(body or "").strip()
+            matched["actor_email"] = str(actor_email or "").strip().lower() or None
+            matched["url"] = deep_link_for_run(rid)
+            matched["created_at"] = _now()
+            _save(data)
+            return dict(matched)
     return create_notification(
         recipient_email=email,
         event_type=et,
@@ -163,7 +213,17 @@ def upsert_document_notification(
         title=title,
         actor_email=actor_email,
         body=body,
+        email_context=email_context,
     )
+
+
+def _try_email(item: dict[str, Any], email_context: Optional[dict[str, Any]] = None) -> None:
+    try:
+        from .email_graph import maybe_send_notification_email
+
+        maybe_send_notification_email(item, email_context)
+    except Exception as err:
+        logger.debug("Notification email hook skipped: %s", err)
 
 
 def create_notification(
@@ -174,6 +234,7 @@ def create_notification(
     title: str,
     actor_email: Optional[str] = None,
     body: Optional[str] = None,
+    email_context: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
     email = str(recipient_email or "").strip().lower()
     rid = (run_id or "").strip()
@@ -218,6 +279,7 @@ def create_notification(
                     ),
                 )
                 conn.commit()
+                _try_email(item, email_context)
                 return item
             finally:
                 cur.close()
@@ -230,6 +292,7 @@ def create_notification(
         data["items"].insert(0, item)
         data["items"] = data["items"][:2000]
         _save(data)
+    _try_email(item, email_context)
     return item
 
 

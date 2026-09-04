@@ -4527,7 +4527,9 @@ function scheduleReviewSync(delayMs = 800) {
   if (reviewSyncDebounceTimer) clearTimeout(reviewSyncDebounceTimer);
   reviewSyncDebounceTimer = setTimeout(() => {
     reviewSyncDebounceTimer = null;
-    syncReviewStateToFabric();
+    Promise.resolve(syncReviewStateToFabric()).catch((err) => {
+      console.warn("Debounced review sync failed:", err);
+    });
   }, delayMs);
 }
 
@@ -4635,13 +4637,12 @@ async function syncReviewStateToFabric() {
       const errJson = await resp.json().catch(() => ({}));
       const detail = errJson.detail || errJson.message || `HTTP ${resp.status}`;
       console.warn("Fabric review sync warning:", resp.status, errJson);
-      if (resp.status === 409) {
-        throw new Error(detail);
-      }
+      throw new Error(detail);
     }
     return resp;
   } catch (e) {
     console.warn("Fabric review sync error:", e);
+    throw e;
   }
 }
 
@@ -4717,7 +4718,17 @@ function checkAutoUpdateDocumentStatus() {
   } else if (anyRejected) {
     activeDocumentStatus = "Needs Revision";
   } else {
-    activeDocumentStatus = "Pending Review";
+    // Keep document in review while some rows remain pending — do not collapse
+    // Pending Sign-Off back to Pending Review (avoids status thrash + duplicate notifs).
+    if (
+      activeDocumentStatus === "Approved" ||
+      activeDocumentStatus === "Needs Revision" ||
+      activeDocumentStatus === "Rejected" ||
+      activeDocumentStatus === "Pending Review" ||
+      !activeDocumentStatus
+    ) {
+      activeDocumentStatus = "In Review";
+    }
   }
   updateDocMetadataBadge();
 }
@@ -4890,7 +4901,10 @@ async function signOffPartialRecords() {
   }
 }
 
+let reviewSubmitInFlight = false;
+
 async function submitDocumentForReview() {
+  if (reviewSubmitInFlight) return;
   const allRows = [...maintenanceRegistry, ...sparePartsRegistry, ...troubleshootingRegistry];
   if (allRows.length === 0) {
     alert("No records in the workspace to submit for review.");
@@ -4906,9 +4920,11 @@ async function submitDocumentForReview() {
   updateDocMetadataBadge();
   renderGridPreservingScroll();
 
+  reviewSubmitInFlight = true;
   const signoffBtn = document.getElementById("signoff-btn");
   if (signoffBtn) {
     signoffBtn.disabled = true;
+    signoffBtn.setAttribute("aria-busy", "true");
     signoffBtn.innerHTML = `<i data-lucide="loader-2" class="spin"></i><span>Submitting…</span>`;
     if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
   }
@@ -4920,17 +4936,22 @@ async function submitDocumentForReview() {
       signoffBtn.innerHTML = `<i data-lucide="check-check"></i><span>Submitted</span>`;
       if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
       setTimeout(() => {
+        reviewSubmitInFlight = false;
         if (signoffBtn) {
-          signoffBtn.disabled = false;
+          signoffBtn.removeAttribute("aria-busy");
           updateRoleActionButtons();
         }
       }, 1500);
+    } else {
+      reviewSubmitInFlight = false;
     }
   } catch (err) {
+    reviewSubmitInFlight = false;
     activeDocumentStatus = priorStatus;
     updateDocMetadataBadge();
     renderGridPreservingScroll();
     if (signoffBtn) {
+      signoffBtn.removeAttribute("aria-busy");
       signoffBtn.disabled = false;
       updateRoleActionButtons();
     }
@@ -4957,18 +4978,25 @@ function updateRoleActionButtons() {
   if (signoffBtn) {
     signoffBtn.style.display = totalRecords > 0 ? "inline-flex" : "none";
     const alreadyApproved = isDocumentAlreadyApproved();
-    if (allowApprove) {
+    if (reviewSubmitInFlight) {
+      signoffBtn.disabled = true;
+      signoffBtn.setAttribute("aria-busy", "true");
+      signoffBtn.innerHTML = `<i data-lucide="loader-2" class="spin"></i><span>Submitting…</span>`;
+    } else if (allowApprove) {
       signoffBtn.title = "Sync review status and partial sign-off to Microsoft Fabric";
       signoffBtn.innerHTML = `<i data-lucide="check"></i><span>Sign-Off</span>`;
       signoffBtn.disabled = false;
+      signoffBtn.removeAttribute("aria-busy");
     } else if (alreadyApproved) {
       signoffBtn.title = "This document was already signed off and cannot be submitted again";
       signoffBtn.innerHTML = `<i data-lucide="check-check"></i><span>Already Approved</span>`;
       signoffBtn.disabled = true;
+      signoffBtn.removeAttribute("aria-busy");
     } else {
       signoffBtn.title = "Submit workspace changes for approver review";
       signoffBtn.innerHTML = `<i data-lucide="send"></i><span>Submit for Review</span>`;
       signoffBtn.disabled = false;
+      signoffBtn.removeAttribute("aria-busy");
     }
   }
   if (typeof lucide !== "undefined" && lucide.createIcons) lucide.createIcons();
@@ -4996,6 +5024,7 @@ const signoffBtn = document.getElementById("signoff-btn");
 if (signoffBtn) {
   signoffBtn.addEventListener("click", (e) => {
     e.preventDefault();
+    if (reviewSubmitInFlight || signoffBtn.disabled) return;
     if (canApproveOrSignOff()) {
       signOffPartialRecords();
     } else {
