@@ -361,17 +361,14 @@ html, body {
 
 /* Keep file input activatable via <label for> (display:none breaks that in some browsers) */
 .file-input-hidden {
-  position: absolute;
+  position: fixed;
+  left: 0;
+  top: 0;
   width: 1px;
   height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
   opacity: 0;
-  pointer-events: none;
+  overflow: hidden;
+  z-index: 2500;
 }
 
 /* Upload Card Zone */
@@ -4027,13 +4024,17 @@ html[data-theme="light"] .history-table-scroll .admin-logs-table thead th {
   opacity: 0.8;
 }
 
-/* Upload popup: page range + file chooser, opens under the Upload button */
+/* Upload popup: page range + file chooser. Body-level, position:fixed (JS places it). */
 .upload-popover {
-  position: absolute;
-  top: calc(100% + 12px);
-  right: 0;
-  width: min(540px, 94vw);
-  z-index: 200;
+  position: fixed;
+  top: 72px;
+  right: 24px;
+  width: min(540px, calc(100vw - 24px));
+  max-height: min(72vh, calc(100vh - 88px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  z-index: 2400;
   padding: 1rem 1.1rem 1.1rem;
   background: var(--bg-glass-active);
   backdrop-filter: blur(16px);

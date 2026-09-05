@@ -3462,8 +3462,9 @@ function updateSelectedLocalFile(file) {
 
 if (localDropzone && localFileInput) {
   localDropzone.addEventListener("click", (e) => {
-    e.preventDefault();
     e.stopPropagation();
+    // Native <label for="local-file-input"> already opens the picker.
+    if (e.target && e.target.closest && e.target.closest("label.local-dropzone")) return;
     try {
       localFileInput.value = "";
       localFileInput.click();

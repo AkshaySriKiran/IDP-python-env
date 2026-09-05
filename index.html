@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css?v=128">
+  <link rel="stylesheet" href="styles.css?v=129">
 
   <!-- Apply saved theme before paint to avoid dark/light flash -->
   <script>
@@ -75,79 +75,6 @@
             <span>Document Intake</span>
             <i data-lucide="chevron-down" class="header-upload-caret"></i>
           </button>
-
-          <!-- Document intake popover: SharePoint or Local PC Upload -->
-          <div class="upload-popover" id="page-range-row" onclick="event.stopPropagation()" hidden>
-            <div class="intake-tabs">
-              <button type="button" class="intake-tab active" id="tab-sharepoint">
-                <i data-lucide="cloud"></i> SharePoint
-              </button>
-              <button type="button" class="intake-tab" id="tab-local-upload">
-                <i data-lucide="upload-cloud"></i> Local PC Upload
-              </button>
-            </div>
-
-            <div class="upload-popover-range">
-              <div class="page-range-field">
-                <label for="page-range-start">From page</label>
-                <input type="number" id="page-range-start" min="1" placeholder="1" class="settings-input">
-              </div>
-              <span class="page-range-sep">&ndash;</span>
-              <div class="page-range-field">
-                <label for="page-range-end">To page</label>
-                <input type="number" id="page-range-end" min="1" placeholder="Last" class="settings-input">
-              </div>
-            </div>
-
-            <!-- Panel 1: SharePoint -->
-            <div class="intake-panel" id="panel-sharepoint">
-              <p class="upload-popover-hint">Select a PDF or Word document from your SharePoint library for extraction.</p>
-              
-              <!-- Responsive Dynamic Breadcrumbs & Actions Toolbar -->
-              <div class="sp-breadcrumbs-container">
-                <nav class="sp-breadcrumb-trail" id="sharepoint-breadcrumb" aria-label="SharePoint Directory Breadcrumb">
-                  <button type="button" class="sp-crumb-btn" data-folder-id="" title="Project Root">
-                    <i data-lucide="folder"></i>
-                    <span>Project Root</span>
-                  </button>
-                </nav>
-                <div class="sp-nav-actions">
-                  <button type="button" class="btn btn-ghost btn-sm" id="sharepoint-back-btn" title="Go back to parent directory" style="padding: 0.2rem 0.55rem; font-size: 0.75rem; height: 26px;" hidden>
-                    <i data-lucide="arrow-left" style="width: 13px; height: 13px;"></i>
-                    <span>Back</span>
-                  </button>
-                  <button type="button" class="btn btn-secondary btn-sm sharepoint-refresh-btn" id="sharepoint-refresh-btn" title="Refresh this directory" style="padding: 0.2rem 0.6rem; font-size: 0.75rem; height: 26px;">
-                    <i data-lucide="refresh-cw" style="width: 13px; height: 13px;"></i>
-                    <span>Refresh</span>
-                  </button>
-                </div>
-              </div>
-
-              <!-- SharePoint Files & Folders List -->
-              <div class="sharepoint-files-list" id="sharepoint-files-list" role="listbox" aria-label="SharePoint Files">
-                <p class="sharepoint-files-empty">Open SharePoint to load files…</p>
-              </div>
-            </div>
-
-            <!-- Panel 2: Local PC Upload -->
-            <div class="intake-panel" id="panel-local-upload" hidden>
-              <p class="upload-popover-hint">Select or drop a PDF or Word (.docx) document from your local PC.</p>
-              <input type="file" id="local-file-input" class="file-input-hidden" accept=".pdf,.docx,.doc" tabindex="-1" aria-hidden="true">
-              <div class="local-dropzone" id="local-dropzone">
-                <i data-lucide="file-up" class="dropzone-icon"></i>
-                <p class="dropzone-title">Drag &amp; drop PDF or Word (DOCX) here, or <span class="dropzone-browse">browse file</span></p>
-                <p class="dropzone-sub">Supported formats: PDF, DOCX up to 1GB</p>
-              </div>
-              <div class="selected-file-info" id="selected-file-info" hidden>
-                <div class="selected-file-name-wrap">
-                  <i data-lucide="file-text"></i>
-                  <span id="selected-file-name">No file selected</span>
-                </div>
-                <button type="button" class="btn btn-sm btn-primary" id="local-extract-btn">Extract Document</button>
-              </div>
-            </div>
-          </div>
-
         </div>
 
         <!-- Collapsed tools: expand on click -->
@@ -811,6 +738,72 @@
     </div>
   </div>
 
+  <!-- Document intake popover: kept outside the header so backdrop-filter / border-radius cannot clip it -->
+  <input type="file" id="local-file-input" class="file-input-hidden" accept=".pdf,.docx,.doc" tabindex="-1" aria-hidden="true">
+  <div class="upload-popover" id="page-range-row" role="dialog" aria-label="Document Intake" hidden>
+    <div class="intake-tabs">
+      <button type="button" class="intake-tab active" id="tab-sharepoint">
+        <i data-lucide="cloud"></i> SharePoint
+      </button>
+      <button type="button" class="intake-tab" id="tab-local-upload">
+        <i data-lucide="upload-cloud"></i> Local PC Upload
+      </button>
+    </div>
+
+    <div class="upload-popover-range">
+      <div class="page-range-field">
+        <label for="page-range-start">From page</label>
+        <input type="number" id="page-range-start" min="1" placeholder="1" class="settings-input">
+      </div>
+      <span class="page-range-sep">&ndash;</span>
+      <div class="page-range-field">
+        <label for="page-range-end">To page</label>
+        <input type="number" id="page-range-end" min="1" placeholder="Last" class="settings-input">
+      </div>
+    </div>
+
+    <div class="intake-panel" id="panel-sharepoint">
+      <p class="upload-popover-hint">Select a PDF or Word document from your SharePoint library for extraction.</p>
+      <div class="sp-breadcrumbs-container">
+        <nav class="sp-breadcrumb-trail" id="sharepoint-breadcrumb" aria-label="SharePoint Directory Breadcrumb">
+          <button type="button" class="sp-crumb-btn" data-folder-id="" title="Project Root">
+            <i data-lucide="folder"></i>
+            <span>Project Root</span>
+          </button>
+        </nav>
+        <div class="sp-nav-actions">
+          <button type="button" class="btn btn-ghost btn-sm" id="sharepoint-back-btn" title="Go back to parent directory" style="padding: 0.2rem 0.55rem; font-size: 0.75rem; height: 26px;" hidden>
+            <i data-lucide="arrow-left" style="width: 13px; height: 13px;"></i>
+            <span>Back</span>
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm sharepoint-refresh-btn" id="sharepoint-refresh-btn" title="Refresh this directory" style="padding: 0.2rem 0.6rem; font-size: 0.75rem; height: 26px;">
+            <i data-lucide="refresh-cw" style="width: 13px; height: 13px;"></i>
+            <span>Refresh</span>
+          </button>
+        </div>
+      </div>
+      <div class="sharepoint-files-list" id="sharepoint-files-list" role="listbox" aria-label="SharePoint Files">
+        <p class="sharepoint-files-empty">Open SharePoint to load files…</p>
+      </div>
+    </div>
+
+    <div class="intake-panel" id="panel-local-upload" hidden>
+      <p class="upload-popover-hint">Select or drop a PDF or Word (.docx) document from your local PC.</p>
+      <label class="local-dropzone" id="local-dropzone" for="local-file-input">
+        <i data-lucide="file-up" class="dropzone-icon"></i>
+        <p class="dropzone-title">Drag &amp; drop PDF or Word (DOCX) here, or <span class="dropzone-browse">browse file</span></p>
+        <p class="dropzone-sub">Supported formats: PDF, DOCX up to 1GB</p>
+      </label>
+      <div class="selected-file-info" id="selected-file-info" hidden>
+        <div class="selected-file-name-wrap">
+          <i data-lucide="file-text"></i>
+          <span id="selected-file-name">No file selected</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-primary" id="local-extract-btn">Extract Document</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Sign-in landing page -->
   <div id="login-modal" class="auth-landing" hidden>
     <button type="button" id="login-close" class="auth-landing-close" title="Continue without signing in">&times;</button>
@@ -938,20 +931,39 @@
         }).observe(chatMessages, { childList: true });
       }
 
-      // Document Intake: only the header button toggles the popover
-      // (do not capture-click the whole strip — that closes/blocks SharePoint + local).
+      // Document Intake: header button toggles a body-level popover (not clipped by the header).
       const uploadPopover = document.getElementById('page-range-row');
       const uploadMenuBtn = document.getElementById('upload-menu-btn');
       const uploadOverlay = document.getElementById('progress-overlay');
+
+      function positionUploadPopover() {
+        if (!uploadPopover || !uploadMenuBtn) return;
+        const rect = uploadMenuBtn.getBoundingClientRect();
+        const width = Math.min(540, Math.max(280, window.innerWidth - 24));
+        let left = rect.right - width;
+        if (left < 12) left = 12;
+        if (left + width > window.innerWidth - 12) left = Math.max(12, window.innerWidth - width - 12);
+        let top = rect.bottom + 8;
+        uploadPopover.style.position = 'fixed';
+        uploadPopover.style.top = `${Math.round(top)}px`;
+        uploadPopover.style.left = `${Math.round(left)}px`;
+        uploadPopover.style.right = 'auto';
+        uploadPopover.style.width = `${Math.round(width)}px`;
+        uploadPopover.style.maxHeight = `${Math.max(220, window.innerHeight - top - 16)}px`;
+        uploadPopover.style.zIndex = '2400';
+      }
 
       function setUploadPopover(open) {
         if (!uploadPopover || !uploadMenuBtn) return;
         uploadPopover.hidden = !open;
         uploadMenuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        if (open && typeof window.loadSharePointFiles === 'function' &&
-            document.getElementById('panel-sharepoint') &&
-            !document.getElementById('panel-sharepoint').hidden) {
-          window.loadSharePointFiles();
+        if (open) {
+          positionUploadPopover();
+          if (typeof window.loadSharePointFiles === 'function' &&
+              document.getElementById('panel-sharepoint') &&
+              !document.getElementById('panel-sharepoint').hidden) {
+            window.loadSharePointFiles();
+          }
         }
       }
 
@@ -959,13 +971,17 @@
         uploadMenuBtn.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          if (uploadOverlay && uploadOverlay.classList.contains('active')) return;
           setUploadPopover(uploadPopover.hidden);
         });
       }
 
+      window.addEventListener('resize', () => {
+        if (uploadPopover && !uploadPopover.hidden) positionUploadPopover();
+      });
+
       document.addEventListener('click', (e) => {
-        if (!e.target.closest('.header-upload')) setUploadPopover(false);
+        if (e.target.closest('#page-range-row') || e.target.closest('#upload-menu-btn') || e.target.closest('#local-file-input')) return;
+        setUploadPopover(false);
       });
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') setUploadPopover(false);
@@ -983,6 +999,6 @@
   </script>
 
   <script src="auth-admin.js?v=62"></script>
-  <script src="app.js?v=96"></script>
+  <script src="app.js?v=97"></script>
 </body>
 </html>
