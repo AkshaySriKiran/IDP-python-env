@@ -217,7 +217,7 @@ async def sso_callback(
     if not email:
         raise HTTPException(status_code=400, detail="Microsoft profile did not provide a valid email.")
 
-    ui_base = base
+    ui_base = (get_ui_base_url() or "").rstrip("/") or base
     try:
         raw_user = store.get_or_create_sso_user(email=email, display_name=name)
     except PermissionError as err:

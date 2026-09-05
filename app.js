@@ -855,6 +855,7 @@ try {
     }
   }
 } catch (e) {}
+window.apiBaseUrl = apiBaseUrl;
 
 async function checkPythonApiHealth(retryCount = 1) {
   for (let attempt = 0; attempt <= retryCount; attempt++) {
@@ -950,6 +951,20 @@ async function confirmLargePdfIfNeeded(pages, fileSizeBytes = 0) {
   return true;
 }
 
+async function parseApiJson(resp, fallbackMsg) {
+  const contentType = (resp.headers && resp.headers.get("content-type")) || "";
+  if (contentType.includes("text/html")) {
+    throw new Error(
+      `${fallbackMsg || "API request failed"} (received HTML instead of JSON — check sign-in and /api routing).`
+    );
+  }
+  try {
+    return await resp.json();
+  } catch (err) {
+    throw new Error(fallbackMsg || "The API returned an unreadable response.");
+  }
+}
+
 async function extractViaPythonApi(sharepointItem, pageCountHint = null) {
   // Prefer admin/local browser key when present; otherwise API uses GEMINI_API_KEY from backend/.env
   refreshAdminTestGeminiKey();
@@ -1032,10 +1047,14 @@ async function extractViaPythonApi(sharepointItem, pageCountHint = null) {
   if (!createResp.ok) {
     let detail = "";
     try {
-      const errJson = await createResp.json();
+      const errJson = await parseApiJson(createResp, `API HTTP ${createResp.status}`);
       detail = errJson.detail || JSON.stringify(errJson);
     } catch (e) {
-      detail = await createResp.text();
+      detail = e.message || `API HTTP ${createResp.status}`;
+    }
+    if (createResp.status === 401) {
+      if (typeof window.handleAuthFailure === "function") window.handleAuthFailure("Authentication required");
+      throw new Error("Sign in required to extract documents.");
     }
     throw new Error(detail || `API HTTP ${createResp.status}`);
   }
@@ -3187,16 +3206,27 @@ async function loadSharePointFiles(targetFolderId = null, targetFolderName = nul
   if (!resp.ok) {
     let detail = "";
     try {
-      const errJson = await resp.json();
+      const errJson = await parseApiJson(resp, `HTTP ${resp.status}`);
       detail = errJson.detail || JSON.stringify(errJson);
     } catch (e) {
-      detail = await resp.text();
+      detail = e.message || `HTTP ${resp.status}`;
+    }
+    if (resp.status === 401) {
+      if (typeof window.handleAuthFailure === "function") window.handleAuthFailure("Authentication required");
+      sharepointFilesList.innerHTML = `<p class="sharepoint-files-error">Sign in required to list SharePoint files.</p>`;
+      return;
     }
     sharepointFilesList.innerHTML = `<p class="sharepoint-files-error">${escapeHTML(detail || `HTTP ${resp.status}`)}</p>`;
     return;
   }
 
-  const payload = await resp.json();
+  let payload;
+  try {
+    payload = await parseApiJson(resp, "SharePoint listing failed");
+  } catch (err) {
+    sharepointFilesList.innerHTML = `<p class="sharepoint-files-error">${escapeHTML(String(err.message || err))}</p>`;
+    return;
+  }
   if (payload && payload.configured === false) {
     sharepointFilesList.innerHTML = `<p class="sharepoint-files-error">SharePoint is not configured on the API. Set AZURE_* and SHAREPOINT_DRIVE_ID in backend/.env.</p>`;
     return;
@@ -3477,6 +3507,10 @@ if (localDropzone && localFileInput) {
   localFileInput.addEventListener("change", (e) => {
     if (e.target.files && e.target.files[0]) {
       updateSelectedLocalFile(e.target.files[0]);
+      const pop = document.getElementById("page-range-row");
+      const btn = document.getElementById("upload-menu-btn");
+      if (pop) pop.hidden = false;
+      if (btn) btn.setAttribute("aria-expanded", "true");
     }
   });
 
@@ -3534,6 +3568,7 @@ async function handleSharePointExtract(item) {
   try {
     if (typeof window.requireAuthForApi === "function") window.requireAuthForApi();
   } catch (e) {
+    alert("Sign in required to extract documents.");
     return;
   }
 

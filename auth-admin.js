@@ -10,7 +10,16 @@ const THEME_STORAGE_KEY = "idp_theme_v2";
 let authState = {
   token: null,
   user: null,
-  authRequired: false,
+  // CloudFront / deployed hosts require sign-in immediately so Document Intake
+  // cannot run unauthenticated before /api/auth/status returns.
+  authRequired: (function () {
+    try {
+      const host = typeof location !== "undefined" ? location.hostname : "";
+      return !!(host && host !== "localhost" && host !== "127.0.0.1");
+    } catch (e) {
+      return false;
+    }
+  })(),
   modelCatalog: [],
   defaultCopilotLimit: 5
 };
@@ -80,7 +89,7 @@ function getAuthHeaders(extra = {}) {
 function saveAuthSession(token, user) {
   closeAccessDeniedModal();
   window._accessDeniedShown = false;
-  authState.token = token;
+  authState.token = String(token || "").trim();
   authState.user = user;
   try {
     sessionStorage.setItem(AUTH_TOKEN_KEY, token);
@@ -152,6 +161,7 @@ function handleAuthFailure(detail) {
   }
   return false;
 }
+window.handleAuthFailure = handleAuthFailure;
 
 async function fetchAuthStatus() {
   const resp = await fetch(`${apiBase()}/api/auth/status`, {
@@ -1971,10 +1981,11 @@ window.setAdminView = setAdminView;
 
 window.requireAuthForApi = function requireAuthForApi() {
   if (authState.authRequired && !isLoggedIn()) {
-    openLoginModal("Sign in required");
+    openLoginModal("Sign in required to use Document Intake");
     throw new Error("Sign in required");
   }
 };
+window.apiBase = apiBase;
 
 /* Subtle craft signature — encoded + DOM-locked (reappears if removed). */
 (function installCraftSignatureLock() {
@@ -2038,8 +2049,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const ssoToken = params.get("sso_token");
     const ssoUserRaw = params.get("user");
     if (ssoToken && ssoUserRaw) {
-      const ssoUser = JSON.parse(decodeURIComponent(ssoUserRaw));
+      let ssoUser;
+      try {
+        ssoUser = JSON.parse(ssoUserRaw);
+      } catch (_) {
+        ssoUser = JSON.parse(decodeURIComponent(ssoUserRaw));
+      }
       saveAuthSession(ssoToken, ssoUser);
+      closeLoginModal();
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   } catch (err) {
@@ -2057,7 +2074,7 @@ document.addEventListener("DOMContentLoaded", () => {
       closeAccessDeniedModal();
       clearAuthSession();
       try {
-        const resp = await fetch(`${apiBaseUrl}/api/auth/sso/login?prompt=select_account`);
+        const resp = await fetch(`${apiBase()}/api/auth/sso/login?prompt=select_account`);
         if (resp.ok) {
           const data = await resp.json();
           if (data.auth_url) {
@@ -2076,7 +2093,7 @@ document.addEventListener("DOMContentLoaded", () => {
     ssoBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       try {
-        const resp = await fetch(`${apiBaseUrl}/api/auth/sso/login`);
+        const resp = await fetch(`${apiBase()}/api/auth/sso/login`);
         if (!resp.ok) {
           const detail = await resp.json();
           alert(detail.detail || "SSO login is not available.");

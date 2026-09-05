@@ -953,11 +953,14 @@
         uploadPopover.style.zIndex = '2400';
       }
 
+      let ignoreOutsideClickUntil = 0;
+
       function setUploadPopover(open) {
         if (!uploadPopover || !uploadMenuBtn) return;
         uploadPopover.hidden = !open;
         uploadMenuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
         if (open) {
+          ignoreOutsideClickUntil = Date.now() + 400;
           positionUploadPopover();
           if (typeof window.loadSharePointFiles === 'function' &&
               document.getElementById('panel-sharepoint') &&
@@ -980,7 +983,8 @@
       });
 
       document.addEventListener('click', (e) => {
-        if (e.target.closest('#page-range-row') || e.target.closest('#upload-menu-btn') || e.target.closest('#local-file-input')) return;
+        if (Date.now() < ignoreOutsideClickUntil) return;
+        if (e.target.closest('#page-range-row') || e.target.closest('#upload-menu-btn') || e.target.closest('#local-file-input') || e.target.closest('#local-dropzone')) return;
         setUploadPopover(false);
       });
       document.addEventListener('keydown', (e) => {
@@ -998,7 +1002,7 @@
     });
   </script>
 
-  <script src="auth-admin.js?v=62"></script>
-  <script src="app.js?v=97"></script>
+  <script src="auth-admin.js?v=63"></script>
+  <script src="app.js?v=98"></script>
 </body>
 </html>
